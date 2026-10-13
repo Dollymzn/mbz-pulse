@@ -449,6 +449,10 @@ $('#fCountry').addEventListener('input', () => { normCountry($('#fCountry')); re
 $('#fPost').addEventListener('input', refilter);
 $('#fClear').addEventListener('click', () => { $('#fSite').value = ''; $('#fCountry').value = ''; $('#fPost').value = ''; loadRecords(true); });
 $('#more').addEventListener('click', () => loadRecords(false));
+$('#xlsx').addEventListener('click', () => {
+  const q = filterQuery(); q.delete('latest'); q.set('tzo', new Date().getTimezoneOffset());
+  window.location.href = '/api/records/export.xlsx?' + q;
+});
 $('#csv').addEventListener('click', () => { window.location.href = '/api/records/export.csv?' + filterQuery(); });
 
 /* ---------- boot ---------- */

@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const ExcelJS = require('exceljs');
 const { pool, migrate } = require('./db');
 
 const PROD = process.env.NODE_ENV === 'production' || !!process.env.RAILWAY_ENVIRONMENT;
@@ -336,6 +337,176 @@ app.get('/api/records/export.csv', auth, wrap(async (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="mbz-pulse-${new Date().toISOString().slice(0, 10)}.csv"`);
   res.send('﻿' + lines.join('\r\n'));
+}));
+
+/* ---------- exportação Excel ---------- */
+
+const CUR_FMT = { USD: '"$" #,##0.00##', BRL: '"R$" #,##0.00##', EUR: '"€" #,##0.00##' };
+const FLAT_PCT = 0.02; // mesma faixa de "estável" da tela
+const pctOf = (cur, prev) => (prev ? (cur - prev) / prev : null);
+const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+
+function statusOf(dCpr, dCpm) {
+  if (dCpr === null && dCpm === null) return '1ª LEITURA';
+  const cls = (d) => (d === null ? null : d < -FLAT_PCT ? 'good' : d > FLAT_PCT ? 'bad' : 'flat');
+  const set = [cls(dCpr), cls(dCpm)];
+  if (set.includes('good') && set.includes('bad')) return 'MISTO';
+  if (set.includes('bad')) return 'PIOROU';
+  if (set.includes('good')) return 'MELHOROU';
+  return 'ESTÁVEL';
+}
+const STATUS_COLOR = { MELHOROU: 'FF12824C', PIOROU: 'FFD81B60', MISTO: 'FFB7791F', 'ESTÁVEL': 'FF0E7490', '1ª LEITURA': 'FF64748B' };
+
+// Monta uma aba: faixa de título, cabeçalho escuro, filtro, painel congelado e formatos por tipo de coluna.
+function addSheet(wb, name, subtitle, cols, rows) {
+  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 4, xSplit: 1 }] });
+  ws.columns = cols.map((c) => ({ width: c.w }));
+  ws.mergeCells(1, 1, 1, cols.length);
+  ws.mergeCells(2, 1, 2, cols.length);
+  const dark = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0A0E16' } };
+  Object.assign(ws.getCell(1, 1), { value: `MBZ::PULSE — ${name}`, font: { name: 'Consolas', bold: true, size: 14, color: { argb: 'FF39FF9C' } }, fill: dark });
+  Object.assign(ws.getCell(2, 1), { value: subtitle, font: { name: 'Consolas', size: 9, color: { argb: 'FF8FA3BA' } }, fill: dark });
+  ws.getRow(1).height = 24;
+  const head = ws.getRow(4);
+  cols.forEach((c, i) => {
+    const cell = head.getCell(i + 1);
+    cell.value = c.h;
+    cell.font = { name: 'Consolas', bold: true, size: 10, color: { argb: 'FF19E3FF' } };
+    cell.fill = dark;
+    cell.alignment = { vertical: 'middle', horizontal: c.t === 'text' ? 'left' : 'right' };
+    cell.border = { bottom: { style: 'medium', color: { argb: 'FF39FF9C' } } };
+  });
+  head.height = 20;
+  rows.forEach((r, n) => {
+    const row = ws.getRow(5 + n);
+    cols.forEach((c, i) => {
+      const cell = row.getCell(i + 1);
+      const v = r[c.k];
+      cell.value = v === undefined ? null : v;
+      cell.font = { name: 'Consolas', size: 10 };
+      if (c.t === 'cur') cell.numFmt = CUR_FMT[r.currency] || '#,##0.00##';
+      else if (c.t === 'date') cell.numFmt = 'dd/mm/yyyy hh:mm';
+      else if (c.t === 'int') cell.numFmt = '0';
+      else if (c.t === 'pct') {
+        cell.numFmt = '+0.0%;-0.0%;0.0%';
+        if (typeof v === 'number') {
+          cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: v < -FLAT_PCT ? 'FF12824C' : v > FLAT_PCT ? 'FFD81B60' : 'FF64748B' } };
+        }
+      } else if (c.t === 'status' && v) {
+        cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: STATUS_COLOR[v] || 'FF64748B' } };
+      }
+      if (n % 2) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F6FA' } };
+    });
+  });
+  if (rows.length) ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: 4 + rows.length, column: cols.length } };
+  return ws;
+}
+
+app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
+  const params = [req.uid];
+  const where = recordFilters({ ...req.query, latest: undefined }, params);
+  const { rows } = await pool.query(
+    `${BASE} SELECT * FROM base ${where} ORDER BY lower(site_name), site_id, post_id, country, created_at, id LIMIT 50000`, params);
+
+  // Excel não tem fuso: desloca para o horário local de quem exportou.
+  const tzo = Math.min(Math.max(parseInt(req.query.tzo, 10) || 0, -840), 840);
+  const local = (d) => (d ? new Date(d.getTime() - tzo * 60000) : null);
+  const now = local(new Date());
+  const stamp = now.toISOString().slice(0, 16).replace('T', ' ');
+
+  // Agrupa: site -> campanha (post + país) -> leituras em ordem cronológica.
+  const sites = new Map();
+  for (const r of rows) {
+    if (!sites.has(r.site_id)) sites.set(r.site_id, { name: r.site_name, currency: r.currency, camps: new Map(), readings: [] });
+    const s = sites.get(r.site_id);
+    const key = r.post_id + '|' + r.country;
+    if (!s.camps.has(key)) s.camps.set(key, []);
+    s.camps.get(key).push(r);
+    s.readings.push(r);
+  }
+
+  const campRows = [];
+  const summary = [];
+  for (const s of sites.values()) {
+    const mine = [];
+    for (const list of s.camps.values()) {
+      const last = list[list.length - 1];
+      const cprs = list.map((x) => x.cpr), cpms = list.map((x) => x.cpm);
+      const dCpr = last.prev_cpr === null ? null : pctOf(last.cpr, last.prev_cpr);
+      const dCpm = last.prev_cpm === null ? null : pctOf(last.cpm, last.prev_cpm);
+      mine.push({
+        site: s.name, currency: s.currency, post_id: last.post_id, country: last.country, n: list.length,
+        first_at: local(list[0].created_at), last_at: local(last.created_at),
+        cpr: last.cpr, prev_cpr: last.prev_cpr, d_cpr: dCpr, cpr_min: Math.min(...cprs), cpr_max: Math.max(...cprs), cpr_avg: avg(cprs),
+        cpm: last.cpm, prev_cpm: last.prev_cpm, d_cpm: dCpm, cpm_min: Math.min(...cpms), cpm_max: Math.max(...cpms), cpm_avg: avg(cpms),
+        status: statusOf(dCpr, dCpm), note: last.note,
+      });
+    }
+    mine.sort((a, b) => a.cpr - b.cpr);
+    campRows.push(...mine);
+    const count = (st) => mine.filter((c) => c.status === st).length;
+    const label = (c) => `${c.post_id} · ${c.country}`;
+    summary.push({
+      site: s.name, currency: s.currency, moeda: s.currency, camps: mine.length, readings: s.readings.length,
+      cpr_avg: avg(mine.map((c) => c.cpr)), cpm_avg: avg(mine.map((c) => c.cpm)),
+      up: count('MELHOROU'), down: count('PIOROU'), mixed: count('MISTO'), flat: count('ESTÁVEL'),
+      best: label(mine[0]), best_cpr: mine[0].cpr, worst: label(mine[mine.length - 1]), worst_cpr: mine[mine.length - 1].cpr,
+      last_at: local(new Date(Math.max(...s.readings.map((r) => r.created_at.getTime())))),
+    });
+  }
+
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'MBZ::PULSE';
+  wb.created = new Date();
+  const sub = `gerado em ${stamp} · ${rows.length} leituras · ${campRows.length} campanhas · ${sites.size} sites · variação: negativa = custo caiu (bom)`;
+
+  addSheet(wb, 'RESUMO', sub, [
+    { h: 'SITE', k: 'site', t: 'text', w: 26 }, { h: 'MOEDA', k: 'moeda', t: 'text', w: 8 },
+    { h: 'CAMPANHAS', k: 'camps', t: 'int', w: 12 }, { h: 'LEITURAS', k: 'readings', t: 'int', w: 11 },
+    { h: 'CPR MÉDIO ATUAL', k: 'cpr_avg', t: 'cur', w: 18 }, { h: 'CPM MÉDIO ATUAL', k: 'cpm_avg', t: 'cur', w: 18 },
+    { h: 'MELHORARAM', k: 'up', t: 'int', w: 13 }, { h: 'PIORARAM', k: 'down', t: 'int', w: 11 },
+    { h: 'MISTAS', k: 'mixed', t: 'int', w: 9 }, { h: 'ESTÁVEIS', k: 'flat', t: 'int', w: 11 },
+    { h: 'MELHOR CPR (POST · PAÍS)', k: 'best', t: 'text', w: 30 }, { h: 'CPR', k: 'best_cpr', t: 'cur', w: 12 },
+    { h: 'PIOR CPR (POST · PAÍS)', k: 'worst', t: 'text', w: 30 }, { h: 'CPR', k: 'worst_cpr', t: 'cur', w: 12 },
+    { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
+  ], summary);
+
+  addSheet(wb, 'CAMPANHAS', sub + ' · ordenado por site e CPR atual', [
+    { h: 'SITE', k: 'site', t: 'text', w: 24 }, { h: 'POST ID', k: 'post_id', t: 'text', w: 22 }, { h: 'PAÍS', k: 'country', t: 'text', w: 7 },
+    { h: 'STATUS', k: 'status', t: 'status', w: 13 }, { h: 'LEITURAS', k: 'n', t: 'int', w: 10 },
+    { h: 'CPR ATUAL', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
+    { h: 'CPR MÍN', k: 'cpr_min', t: 'cur', w: 11 }, { h: 'CPR MÁX', k: 'cpr_max', t: 'cur', w: 11 }, { h: 'CPR MÉDIO', k: 'cpr_avg', t: 'cur', w: 12 },
+    { h: 'CPM ATUAL', k: 'cpm', t: 'cur', w: 12 }, { h: 'CPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ CPM', k: 'd_cpm', t: 'pct', w: 10 },
+    { h: 'CPM MÍN', k: 'cpm_min', t: 'cur', w: 11 }, { h: 'CPM MÁX', k: 'cpm_max', t: 'cur', w: 11 }, { h: 'CPM MÉDIO', k: 'cpm_avg', t: 'cur', w: 12 },
+    { h: 'PRIMEIRA LEITURA', k: 'first_at', t: 'date', w: 18 }, { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
+    { h: 'ÚLTIMA OBS', k: 'note', t: 'text', w: 40 },
+  ], campRows);
+
+  // Uma aba por site com todas as leituras, da mais recente para a mais antiga.
+  const used = new Set(['RESUMO', 'CAMPANHAS']);
+  for (const s of sites.values()) {
+    let base = s.name.replace(/[\[\]:*?\/\\']/g, ' ').trim().slice(0, 28) || 'SITE';
+    let name = base;
+    for (let i = 2; used.has(name.toUpperCase()); i++) name = `${base.slice(0, 25)} (${i})`;
+    used.add(name.toUpperCase());
+    const list = s.readings.slice().sort((a, b) => b.created_at - a.created_at || b.id - a.id).map((r) => ({
+      currency: s.currency, at: local(r.created_at), post_id: r.post_id, country: r.country,
+      cpr: r.cpr, prev_cpr: r.prev_cpr, d_cpr: r.prev_cpr === null ? null : pctOf(r.cpr, r.prev_cpr),
+      cpm: r.cpm, prev_cpm: r.prev_cpm, d_cpm: r.prev_cpm === null ? null : pctOf(r.cpm, r.prev_cpm),
+      note: r.note,
+    }));
+    addSheet(wb, name, `${s.name} · ${s.currency} · ${list.length} leituras · ${s.camps.size} campanhas · gerado em ${stamp}`, [
+      { h: 'DATA / HORA', k: 'at', t: 'date', w: 18 }, { h: 'POST ID', k: 'post_id', t: 'text', w: 22 }, { h: 'PAÍS', k: 'country', t: 'text', w: 7 },
+      { h: 'CPR', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
+      { h: 'CPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'CPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ CPM', k: 'd_cpm', t: 'pct', w: 10 },
+      { h: 'OBSERVAÇÃO', k: 'note', t: 'text', w: 44 },
+    ], list);
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="mbz-pulse-${stamp.slice(0, 10)}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
 }));
 
 /* ---------- estático + erros ---------- */
