@@ -9,6 +9,10 @@ const { pool, migrate } = require('./db');
 const PROD = process.env.NODE_ENV === 'production' || !!process.env.RAILWAY_ENVIRONMENT;
 const PORT = process.env.PORT || 3000;
 const INVITE_CODE = (process.env.INVITE_CODE || '').trim();
+// E-mails com acesso master (veem e filtram os sites de todos os gestores). Separados por vírgula.
+const MASTER_EMAILS = (process.env.MASTER_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+const COMPANIES = ['TN Digitech', 'Moodlr'];
+const ACTIONS = ['escalei', 'reduzi', 'mantive'];
 const COOKIE = 'mbz_pulse';
 const MAX_AGE = 30 * 24 * 60 * 60; // 30 dias
 
@@ -66,6 +70,20 @@ function intId(v, label = 'ID') {
   return n;
 }
 
+function companyOf(v, { required = true } = {}) {
+  const s = String(v ?? '').trim();
+  if (!s && !required) return '';
+  if (!COMPANIES.includes(s)) throw bad('Empresa inválida. Escolha ' + COMPANIES.join(' ou ') + '.');
+  return s;
+}
+
+function actionOf(v) {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (!s) return '';
+  if (!ACTIONS.includes(s)) throw bad('Ação inválida.');
+  return s;
+}
+
 const CURRENCIES = ['USD', 'BRL', 'EUR'];
 
 function readCookie(req, name) {
@@ -83,15 +101,28 @@ function setSession(res, user) {
     `${COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${MAX_AGE}${PROD ? '; Secure' : ''}`);
 }
 
-function auth(req, res, next) {
+const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email, company: u.company, is_master: u.is_master });
+
+// Carrega o usuário a cada chamada: req.uid, req.user e req.owner (null = master, vê tudo).
+async function auth(req, res, next) {
   try {
     const token = readCookie(req, COOKIE);
     if (!token) throw new Error('no token');
-    req.uid = jwt.verify(token, JWT_SECRET).uid;
+    const uid = jwt.verify(token, JWT_SECRET).uid;
+    const { rows } = await pool.query('SELECT id, name, email, company, is_master FROM users WHERE id=$1', [uid]);
+    if (!rows[0]) throw new Error('no user');
+    req.uid = uid;
+    req.user = rows[0];
+    req.owner = rows[0].is_master ? null : uid;
     next();
   } catch {
     res.status(401).json({ error: 'Sessão expirada. Entre novamente.' });
   }
+}
+
+function masterOnly(req, res, next) {
+  if (!req.user.is_master) return res.status(403).json({ error: 'Só o usuário master pode fazer isso.' });
+  next();
 }
 
 // Limite simples em memória para as rotas de login/cadastro.
@@ -105,8 +136,10 @@ function limiter(req, res, next) {
 }
 setInterval(() => { const now = Date.now(); for (const [k, h] of hits) if (h.reset < now) hits.delete(k); }, 60e3).unref();
 
-async function ownSite(uid, siteId) {
-  const { rows } = await pool.query('SELECT id, name, currency FROM sites WHERE id=$1 AND user_id=$2', [siteId, uid]);
+// Site do próprio usuário — ou qualquer site, se for master.
+async function ownSite(req, siteId) {
+  const { rows } = await pool.query(
+    'SELECT id, name, currency, user_id FROM sites WHERE id=$1 AND ($2::int IS NULL OR user_id=$2)', [siteId, req.owner]);
   if (!rows[0]) throw new HttpError(404, 'Site não encontrado.');
   return rows[0];
 }
@@ -118,12 +151,13 @@ app.get('/api/health', wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.get('/api/config', (req, res) => res.json({ invite_required: !!INVITE_CODE }));
+app.get('/api/config', (req, res) => res.json({ invite_required: !!INVITE_CODE, companies: COMPANIES, actions: ACTIONS }));
 
 app.post('/api/auth/register', limiter, wrap(async (req, res) => {
   const name = str(req.body.name, 60, 'Nome');
   const email = str(req.body.email, 120, 'E-mail').toLowerCase();
   const password = String(req.body.password || '');
+  const company = companyOf(req.body.company);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw bad('E-mail inválido.');
   if (password.length < 8 || password.length > 100) throw bad('Senha precisa ter entre 8 e 100 caracteres.');
   if (INVITE_CODE) {
@@ -136,10 +170,11 @@ app.post('/api/auth/register', limiter, wrap(async (req, res) => {
   const hash = await bcrypt.hash(password, 11);
   try {
     const { rows } = await pool.query(
-      'INSERT INTO users (name, email, password_hash) VALUES ($1,$2,$3) RETURNING id, name, email',
-      [name, email, hash]);
+      `INSERT INTO users (name, email, password_hash, company, is_master) VALUES ($1,$2,$3,$4,$5)
+       RETURNING id, name, email, company, is_master`,
+      [name, email, hash, company, MASTER_EMAILS.includes(email)]);
     setSession(res, rows[0]);
-    res.status(201).json({ user: rows[0] });
+    res.status(201).json({ user: publicUser(rows[0]) });
   } catch (e) {
     if (e.code === '23505') throw new HttpError(409, 'Já existe uma conta com esse e-mail.');
     throw e;
@@ -149,12 +184,12 @@ app.post('/api/auth/register', limiter, wrap(async (req, res) => {
 app.post('/api/auth/login', limiter, wrap(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const password = String(req.body.password || '');
-  const { rows } = await pool.query('SELECT id, name, email, password_hash FROM users WHERE email=$1', [email]);
+  const { rows } = await pool.query('SELECT id, name, email, company, is_master, password_hash FROM users WHERE email=$1', [email]);
   const u = rows[0];
   const ok = await bcrypt.compare(password, u ? u.password_hash : '$2a$11$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvali');
   if (!u || !ok) throw new HttpError(401, 'E-mail ou senha incorretos.');
   setSession(res, u);
-  res.json({ user: { id: u.id, name: u.name, email: u.email } });
+  res.json({ user: publicUser(u) });
 }));
 
 app.post('/api/auth/logout', (req, res) => {
@@ -162,23 +197,36 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', auth, wrap(async (req, res) => {
-  const { rows } = await pool.query('SELECT id, name, email FROM users WHERE id=$1', [req.uid]);
-  if (!rows[0]) throw new HttpError(401, 'Sessão expirada. Entre novamente.');
-  res.json({ user: rows[0] });
+app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user) }));
+
+// Quem criou a conta antes de existir o campo "empresa" escolhe aqui.
+app.patch('/api/me', auth, wrap(async (req, res) => {
+  const company = companyOf(req.body.company);
+  const { rows } = await pool.query('UPDATE users SET company=$1 WHERE id=$2 RETURNING id, name, email, company, is_master', [company, req.uid]);
+  res.json({ user: publicUser(rows[0]) });
+}));
+
+// Lista de gestores (para os filtros do master).
+app.get('/api/users', auth, masterOnly, wrap(async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT u.id, u.name, u.company, u.is_master, COUNT(s.id)::int AS sites
+    FROM users u LEFT JOIN sites s ON s.user_id = u.id
+    GROUP BY u.id ORDER BY lower(u.name)`);
+  res.json({ users: rows });
 }));
 
 /* ---------- sites ---------- */
 
 app.get('/api/sites', auth, wrap(async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT s.id, s.name, s.url, s.currency, s.created_at,
+    SELECT s.id, s.name, s.url, s.currency, s.created_at, s.user_id AS owner_id,
+           o.name AS owner_name, o.company,
            COUNT(r.id)::int AS records,
            COUNT(DISTINCT (r.post_id, r.country))::int AS campaigns,
            MAX(r.created_at) AS last_at
-    FROM sites s LEFT JOIN records r ON r.site_id = s.id
-    WHERE s.user_id = $1
-    GROUP BY s.id ORDER BY lower(s.name)`, [req.uid]);
+    FROM sites s JOIN users o ON o.id = s.user_id LEFT JOIN records r ON r.site_id = s.id
+    WHERE ($1::int IS NULL OR s.user_id = $1)
+    GROUP BY s.id, o.name, o.company ORDER BY lower(o.name), lower(s.name)`, [req.owner]);
   res.json({ sites: rows });
 }));
 
@@ -191,7 +239,7 @@ function siteBody(body) {
     currency,
   };
 }
-const dupSite = (e) => (e.code === '23505' ? new HttpError(409, 'Você já tem um site com esse nome.') : e);
+const dupSite = (e) => (e.code === '23505' ? new HttpError(409, 'Já existe um site com esse nome para este gestor.') : e);
 
 app.post('/api/sites', auth, wrap(async (req, res) => {
   const s = siteBody(req.body);
@@ -208,15 +256,17 @@ app.patch('/api/sites/:id', auth, wrap(async (req, res) => {
   const s = siteBody(req.body);
   try {
     const { rows } = await pool.query(
-      'UPDATE sites SET name=$1, url=$2, currency=$3 WHERE id=$4 AND user_id=$5 RETURNING id, name, url, currency',
-      [s.name, s.url, s.currency, id, req.uid]);
+      `UPDATE sites SET name=$1, url=$2, currency=$3 WHERE id=$4 AND ($5::int IS NULL OR user_id=$5)
+       RETURNING id, name, url, currency`,
+      [s.name, s.url, s.currency, id, req.owner]);
     if (!rows[0]) throw new HttpError(404, 'Site não encontrado.');
     res.json({ site: rows[0] });
   } catch (e) { throw dupSite(e); }
 }));
 
 app.delete('/api/sites/:id', auth, wrap(async (req, res) => {
-  const { rowCount } = await pool.query('DELETE FROM sites WHERE id=$1 AND user_id=$2', [intId(req.params.id), req.uid]);
+  const { rowCount } = await pool.query(
+    'DELETE FROM sites WHERE id=$1 AND ($2::int IS NULL OR user_id=$2)', [intId(req.params.id), req.owner]);
   if (!rowCount) throw new HttpError(404, 'Site não encontrado.');
   res.json({ ok: true });
 }));
@@ -224,18 +274,24 @@ app.delete('/api/sites/:id', auth, wrap(async (req, res) => {
 /* ---------- registros ---------- */
 
 // Cada linha já vem com o registro anterior da mesma chave (site + post + país).
+// $1 = dono dos sites (null para o master, que vê tudo). gestor = dono do site; added_by = quem gravou.
 const BASE = `
   WITH base AS (
-    SELECT r.id, r.site_id, r.post_id, r.country, r.cpr, r.cpm, r.note, r.created_at,
-           s.name AS site_name, s.currency,
+    SELECT r.id, r.site_id, r.post_id, r.country, r.cpr, r.cpm, r.note, r.action, r.created_at,
+           s.name AS site_name, s.currency, s.user_id AS owner_id,
+           o.name AS owner_name, o.company,
+           u.name AS added_by, r.user_id AS added_by_id,
            LAG(r.cpr) OVER w AS prev_cpr,
            LAG(r.cpm) OVER w AS prev_cpm,
            LAG(r.created_at) OVER w AS prev_at,
            COUNT(*) OVER (PARTITION BY r.site_id, r.post_id, r.country)::int AS readings,
            ROW_NUMBER() OVER (PARTITION BY r.site_id, r.post_id, r.country
                               ORDER BY r.created_at DESC, r.id DESC)::int AS rn
-    FROM records r JOIN sites s ON s.id = r.site_id
-    WHERE r.user_id = $1
+    FROM records r
+      JOIN sites s ON s.id = r.site_id
+      JOIN users o ON o.id = s.user_id
+      JOIN users u ON u.id = r.user_id
+    WHERE ($1::int IS NULL OR s.user_id = $1)
     WINDOW w AS (PARTITION BY r.site_id, r.post_id, r.country ORDER BY r.created_at, r.id)
   )`;
 
@@ -247,12 +303,15 @@ function recordFilters(q, params) {
     params.push(String(q.post_id).trim().slice(0, 80));
     where.push(q.exact === '1' ? `post_id = $${params.length}` : `post_id ILIKE '%' || $${params.length} || '%'`);
   }
+  if (q.company) { params.push(companyOf(q.company)); where.push(`company = $${params.length}`); }
+  if (q.owner_id) { params.push(intId(q.owner_id, 'Gestor')); where.push(`owner_id = $${params.length}`); }
+  if (q.action) { params.push(actionOf(q.action)); where.push(`action = $${params.length}`); }
   if (q.latest === '1') where.push('rn = 1');
   return where.length ? 'WHERE ' + where.join(' AND ') : '';
 }
 
 app.get('/api/records', auth, wrap(async (req, res) => {
-  const params = [req.uid];
+  const params = [req.owner];
   const where = recordFilters(req.query, params);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
@@ -268,87 +327,94 @@ app.get('/api/records', auth, wrap(async (req, res) => {
 // Último registro da mesma campanha (site + post + país) + série para o gráfico.
 // Nunca compara com outro post: cada ID é uma campanha com público e anunciantes próprios.
 app.get('/api/records/last', auth, wrap(async (req, res) => {
-  const siteId = intId(req.query.site_id, 'Site');
+  const site = await ownSite(req, intId(req.query.site_id, 'Site'));
   const postId = String(req.query.post_id || '').trim();
   const c = req.query.country ? country(req.query.country) : null;
   // Ao corrigir uma leitura, compara só com o que veio antes dela.
   const ex = req.query.exclude_id ? intId(req.query.exclude_id) : null;
-  const exSql = ex ? ` AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=${ex} AND user_id=$1)` : '';
-  let exact = null, fallback = null, series = [];
+  const exSql = ex ? ` AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=${ex})` : '';
+  let exact = null, series = [];
   if (postId && c) {
     const r = await pool.query(
-      `SELECT id, post_id, country, cpr, cpm, note, created_at FROM records
-       WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4${exSql}
-       ORDER BY created_at DESC, id DESC LIMIT 30`, [req.uid, siteId, postId, c]);
+      `SELECT id, post_id, country, cpr, cpm, note, action, created_at FROM records
+       WHERE site_id=$1 AND post_id=$2 AND country=$3${exSql}
+       ORDER BY created_at DESC, id DESC LIMIT 30`, [site.id, postId, c]);
     series = r.rows.map(({ cpr, cpm, created_at }) => ({ cpr, cpm, created_at })).reverse();
     exact = r.rows[0] || null;
   }
-  res.json({ exact, fallback, series });
+  res.json({ exact, series });
 }));
 
-app.post('/api/records', auth, wrap(async (req, res) => {
-  const site = await ownSite(req.uid, intId(req.body.site_id, 'Site'));
-  const rec = {
-    post_id: str(req.body.post_id, 80, 'Post ID'),
-    country: country(req.body.country),
-    cpr: money(req.body.cpr, 'CPR'),
-    cpm: money(req.body.cpm, 'eCPM'),
-    note: str(req.body.note, 280, 'Observação', { required: false }),
+function recordBody(body) {
+  return {
+    post_id: str(body.post_id, 80, 'Post ID'),
+    country: country(body.country),
+    cpr: money(body.cpr, 'CPR'),
+    cpm: money(body.cpm, 'eCPM'),
+    note: str(body.note, 280, 'Observação', { required: false }),
+    action: actionOf(body.action),
   };
+}
+const RET = 'id, site_id, post_id, country, cpr, cpm, note, action, created_at';
+
+app.post('/api/records', auth, wrap(async (req, res) => {
+  const site = await ownSite(req, intId(req.body.site_id, 'Site'));
+  const rec = recordBody(req.body);
   const prev = await pool.query(
-    `SELECT cpr, cpm, created_at FROM records
-     WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4
-     ORDER BY created_at DESC, id DESC LIMIT 1`, [req.uid, site.id, rec.post_id, rec.country]);
+    `SELECT cpr, cpm, created_at FROM records WHERE site_id=$1 AND post_id=$2 AND country=$3
+     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rec.post_id, rec.country]);
   const { rows } = await pool.query(
-    `INSERT INTO records (user_id, site_id, post_id, country, cpr, cpm, note)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)
-     RETURNING id, site_id, post_id, country, cpr, cpm, note, created_at`,
-    [req.uid, site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note]);
+    `INSERT INTO records (user_id, site_id, post_id, country, cpr, cpm, note, action)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${RET}`,
+    [req.uid, site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note, rec.action]);
   res.status(201).json({ record: rows[0], previous: prev.rows[0] || null });
 }));
 
-// Corrige uma leitura já gravada. A data original é mantida.
+// Corrige uma leitura já gravada. A data original e quem gravou são mantidos.
 app.patch('/api/records/:id', auth, wrap(async (req, res) => {
   const id = intId(req.params.id);
-  const site = await ownSite(req.uid, intId(req.body.site_id, 'Site'));
+  const site = await ownSite(req, intId(req.body.site_id, 'Site'));
+  const rec = recordBody(req.body);
   const { rows } = await pool.query(
-    `UPDATE records SET site_id=$1, post_id=$2, country=$3, cpr=$4, cpm=$5, note=$6
-     WHERE id=$7 AND user_id=$8
-     RETURNING id, site_id, post_id, country, cpr, cpm, note, created_at`,
-    [site.id, str(req.body.post_id, 80, 'Post ID'), country(req.body.country),
-      money(req.body.cpr, 'CPR'), money(req.body.cpm, 'eCPM'),
-      str(req.body.note, 280, 'Observação', { required: false }), id, req.uid]);
+    `UPDATE records r SET site_id=$1, post_id=$2, country=$3, cpr=$4, cpm=$5, note=$6, action=$7
+     FROM sites s WHERE s.id = r.site_id AND r.id=$8 AND ($9::int IS NULL OR s.user_id=$9)
+     RETURNING r.id, r.site_id, r.post_id, r.country, r.cpr, r.cpm, r.note, r.action, r.created_at`,
+    [site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note, rec.action, id, req.owner]);
   if (!rows[0]) throw new HttpError(404, 'Registro não encontrado.');
   const prev = await pool.query(
     `SELECT cpr, cpm, created_at FROM records
-     WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4
-       AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=$5)
-     ORDER BY created_at DESC, id DESC LIMIT 1`, [req.uid, site.id, rows[0].post_id, rows[0].country, id]);
+     WHERE site_id=$1 AND post_id=$2 AND country=$3
+       AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=$4)
+     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rows[0].post_id, rows[0].country, id]);
   res.json({ record: rows[0], previous: prev.rows[0] || null });
 }));
 
 app.delete('/api/records/:id', auth, wrap(async (req, res) => {
-  const { rowCount } = await pool.query('DELETE FROM records WHERE id=$1 AND user_id=$2', [intId(req.params.id), req.uid]);
+  const { rowCount } = await pool.query(
+    `DELETE FROM records r USING sites s WHERE s.id = r.site_id AND r.id=$1 AND ($2::int IS NULL OR s.user_id=$2)`,
+    [intId(req.params.id), req.owner]);
   if (!rowCount) throw new HttpError(404, 'Registro não encontrado.');
   res.json({ ok: true });
 }));
 
+const ACTION_LABEL = { escalei: 'ESCALEI', reduzi: 'REDUZI', mantive: 'MANTIVE', '': '' };
+
 app.get('/api/records/export.csv', auth, wrap(async (req, res) => {
-  const params = [req.uid];
+  const params = [req.owner];
   const where = recordFilters(req.query, params);
   const { rows } = await pool.query(`${BASE} SELECT * FROM base ${where} ORDER BY created_at DESC, id DESC LIMIT 20000`, params);
-  const TEXT_COLS = new Set([1, 2, 11]); // site, post_id, observação: texto livre do usuário
+  const TEXT_COLS = new Set([1, 2, 3, 4, 5, 14]); // texto livre do usuário
   const cell = (v, i) => {
     let s = v === null || v === undefined ? '' : String(v);
     if (TEXT_COLS.has(i) && /^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita fórmula em planilha
     return '"' + s.replace(/"/g, '""') + '"';
   };
   const pct = (a, b) => (b ? (((a - b) / b) * 100).toFixed(2) : '');
-  const lines = [['data', 'site', 'post_id', 'pais', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'ecpm', 'ecpm_anterior', 'ecpm_var_pct', 'observacao'].join(',')];
+  const lines = [['data', 'post_id', 'pais', 'site', 'empresa', 'gestor', 'adicionado_por', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'ecpm', 'ecpm_anterior', 'ecpm_var_pct', 'acao', 'observacao'].join(',')];
   for (const r of rows) {
     lines.push([
-      r.created_at.toISOString(), r.site_name, r.post_id, r.country, r.currency,
-      r.cpr, r.prev_cpr, pct(r.cpr, r.prev_cpr), r.cpm, r.prev_cpm, pct(r.cpm, r.prev_cpm), r.note,
+      r.created_at.toISOString(), r.post_id, r.country, r.site_name, r.company, r.owner_name, r.added_by, r.currency,
+      r.cpr, r.prev_cpr, pct(r.cpr, r.prev_cpr), r.cpm, r.prev_cpm, pct(r.cpm, r.prev_cpm), ACTION_LABEL[r.action] || '', r.note,
     ].map(cell).join(','));
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -374,24 +440,44 @@ function statusOf(dCpr, dCpm) {
   return 'ESTÁVEL';
 }
 const STATUS_COLOR = { MELHOROU: 'FF12824C', PIOROU: 'FFD81B60', MISTO: 'FFB7791F', 'ESTÁVEL': 'FF0E7490', '1ª LEITURA': 'FF64748B' };
+const ACTION_COLOR = { ESCALEI: 'FF0E7490', REDUZI: 'FFB7791F', MANTIVE: 'FF64748B' };
+const DARK = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0A0E16' } };
+const font = (o = {}) => ({ name: 'Consolas', size: 10, ...o });
+const pctColor = (gain) => (gain > FLAT_PCT ? 'FF12824C' : gain < -FLAT_PCT ? 'FFD81B60' : 'FF64748B');
+
+function styleCell(cell, c, v, r) {
+  cell.font = font();
+  if (c.t === 'cur') cell.numFmt = CUR_FMT[r.currency] || '#,##0.00##';
+  else if (c.t === 'date') cell.numFmt = 'dd/mm/yyyy hh:mm';
+  else if (c.t === 'int') cell.numFmt = '0';
+  else if (c.t === 'pct') {
+    cell.numFmt = '+0.0%;-0.0%;0.0%';
+    if (typeof v === 'number') cell.font = font({ bold: true, color: { argb: pctColor(c.up ? v : -v) } });
+  } else if (c.t === 'status' && v) cell.font = font({ bold: true, color: { argb: STATUS_COLOR[v] || 'FF64748B' } });
+  else if (c.t === 'action' && v) cell.font = font({ bold: true, color: { argb: ACTION_COLOR[v] || 'FF64748B' } });
+  else if (c.t === 'key') cell.font = font({ bold: true, color: { argb: 'FF0B3B4A' } });
+}
+
+function titleRows(ws, title, subtitle, n) {
+  ws.mergeCells(1, 1, 1, n);
+  ws.mergeCells(2, 1, 2, n);
+  Object.assign(ws.getCell(1, 1), { value: title, font: font({ bold: true, size: 14, color: { argb: 'FF39FF9C' } }), fill: DARK });
+  Object.assign(ws.getCell(2, 1), { value: subtitle, font: font({ size: 9, color: { argb: 'FF8FA3BA' } }), fill: DARK });
+  ws.getRow(1).height = 24;
+}
 
 // Monta uma aba: faixa de título, cabeçalho escuro, filtro, painel congelado e formatos por tipo de coluna.
-function addSheet(wb, name, subtitle, cols, rows) {
-  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 4, xSplit: 1 }] });
+function addSheet(wb, name, subtitle, cols, rows, freezeCols = 1) {
+  const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 4, xSplit: freezeCols }] });
   ws.columns = cols.map((c) => ({ width: c.w }));
-  ws.mergeCells(1, 1, 1, cols.length);
-  ws.mergeCells(2, 1, 2, cols.length);
-  const dark = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0A0E16' } };
-  Object.assign(ws.getCell(1, 1), { value: `MBZ::PULSE — ${name}`, font: { name: 'Consolas', bold: true, size: 14, color: { argb: 'FF39FF9C' } }, fill: dark });
-  Object.assign(ws.getCell(2, 1), { value: subtitle, font: { name: 'Consolas', size: 9, color: { argb: 'FF8FA3BA' } }, fill: dark });
-  ws.getRow(1).height = 24;
+  titleRows(ws, `MBZ::PULSE — ${name}`, subtitle, cols.length);
   const head = ws.getRow(4);
   cols.forEach((c, i) => {
     const cell = head.getCell(i + 1);
     cell.value = c.h;
-    cell.font = { name: 'Consolas', bold: true, size: 10, color: { argb: 'FF19E3FF' } };
-    cell.fill = dark;
-    cell.alignment = { vertical: 'middle', horizontal: c.t === 'text' ? 'left' : 'right' };
+    cell.font = font({ bold: true, color: { argb: 'FF19E3FF' } });
+    cell.fill = DARK;
+    cell.alignment = { vertical: 'middle', horizontal: ['text', 'key', 'status', 'action'].includes(c.t) ? 'left' : 'right' };
     cell.border = { bottom: { style: 'medium', color: { argb: 'FF39FF9C' } } };
   });
   head.height = 20;
@@ -401,19 +487,7 @@ function addSheet(wb, name, subtitle, cols, rows) {
       const cell = row.getCell(i + 1);
       const v = r[c.k];
       cell.value = v === undefined ? null : v;
-      cell.font = { name: 'Consolas', size: 10 };
-      if (c.t === 'cur') cell.numFmt = CUR_FMT[r.currency] || '#,##0.00##';
-      else if (c.t === 'date') cell.numFmt = 'dd/mm/yyyy hh:mm';
-      else if (c.t === 'int') cell.numFmt = '0';
-      else if (c.t === 'pct') {
-        cell.numFmt = '+0.0%;-0.0%;0.0%';
-        if (typeof v === 'number') {
-          const gain = c.up ? v : -v;
-          cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: gain > FLAT_PCT ? 'FF12824C' : gain < -FLAT_PCT ? 'FFD81B60' : 'FF64748B' } };
-        }
-      } else if (c.t === 'status' && v) {
-        cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: STATUS_COLOR[v] || 'FF64748B' } };
-      }
+      styleCell(cell, c, v, r);
       if (n % 2) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F6FA' } };
     });
   });
@@ -421,79 +495,89 @@ function addSheet(wb, name, subtitle, cols, rows) {
   return ws;
 }
 
-// Aba "POR SITE": um bloco por site e, dentro dele, um bloco por ID com todas as leituras e horários.
-function addBlocks(wb, sites, subtitle, local) {
-  const ws = wb.addWorksheet('POR SITE', { views: [{ state: 'frozen', ySplit: 2 }] });
-  const HEAD = ['DATA / HORA', 'CPR', 'CPR ANTERIOR', 'Δ CPR', 'eCPM', 'eCPM ANTERIOR', 'Δ eCPM', 'OBSERVAÇÃO'];
-  const N = HEAD.length;
-  ws.columns = [20, 13, 15, 11, 13, 15, 11, 46].map((width) => ({ width }));
-  const fill = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
-  const dark = fill('FF0A0E16');
-  const font = (o) => ({ name: 'Consolas', size: 10, ...o });
-  const pctColor = (gain) => (gain > FLAT_PCT ? 'FF12824C' : gain < -FLAT_PCT ? 'FFD81B60' : 'FF64748B');
+// Aba "IDs": uma linha por ID + país + site, com as últimas leituras lado a lado (mais recente primeiro).
+// Site, empresa e gestor são colunas normais, então dá para filtrar por qualquer um deles.
+const MAX_COLS_READINGS = 8;
+const FIXED = [
+  { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 },
+  { h: 'SITE', k: 'site', t: 'text', w: 22 }, { h: 'EMPRESA', k: 'company', t: 'text', w: 13 }, { h: 'GESTOR', k: 'owner', t: 'text', w: 16 },
+  { h: 'STATUS', k: 'status', t: 'status', w: 12 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 9 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 9 },
+  { h: 'LEIT.', k: 'n', t: 'int', w: 7 },
+];
+const PER = [
+  { h: 'DATA / HORA', k: 'at', t: 'date', w: 17 }, { h: 'CPR', k: 'cpr', t: 'cur', w: 11 }, { h: 'eCPM', k: 'cpm', t: 'cur', w: 11 },
+  { h: 'AÇÃO', k: 'action', t: 'action', w: 10 }, { h: 'POR', k: 'by', t: 'text', w: 12 },
+];
 
-  ws.mergeCells(1, 1, 1, N);
-  ws.mergeCells(2, 1, 2, N);
-  Object.assign(ws.getCell(1, 1), { value: 'MBZ::PULSE — POR SITE, ID POR ID', font: font({ bold: true, size: 14, color: { argb: 'FF39FF9C' } }), fill: dark });
-  Object.assign(ws.getCell(2, 1), { value: subtitle, font: font({ size: 9, color: { argb: 'FF8FA3BA' } }), fill: dark });
-  ws.getRow(1).height = 24;
+function addIdsSheet(wb, camps, subtitle, local, K) {
+  const ws = wb.addWorksheet('IDs', { views: [{ state: 'frozen', xSplit: 3, ySplit: 5 }] });
+  const cols = FIXED.map((c) => ({ width: c.w }));
+  for (let k = 0; k < K; k++) PER.forEach((c) => cols.push({ width: c.w }));
+  ws.columns = cols;
+  const N = cols.length;
+  titleRows(ws, 'MBZ::PULSE — IDs · uma linha por ID', subtitle, N);
+  const light = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD9F4FA' } };
+  const light2 = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDF2F7' } };
+  const sep = { left: { style: 'thin', color: { argb: 'FFB6C2D1' } } };
 
-  let r = 4;
-  for (const s of sites.values()) {
-    ws.mergeCells(r, 1, r, N);
-    Object.assign(ws.getCell(r, 1), {
-      value: `▌ ${s.name}   ·   ${s.currency}   ·   ${s.mine.length} ID${s.mine.length === 1 ? '' : 's'}   ·   ${s.readings.length} leitura${s.readings.length === 1 ? '' : 's'}`,
-      font: font({ bold: true, size: 12, color: { argb: 'FF39FF9C' } }), fill: dark, alignment: { vertical: 'middle' },
+  // linha 4 = grupos (ÚLTIMA LEITURA, ANTERIOR, ...), linha 5 = cabeçalho com filtro
+  const g = ws.getRow(4), h = ws.getRow(5);
+  FIXED.forEach((c, i) => {
+    Object.assign(g.getCell(i + 1), { fill: DARK });
+    Object.assign(h.getCell(i + 1), {
+      value: c.h, font: font({ bold: true, color: { argb: 'FF19E3FF' } }), fill: DARK,
+      alignment: { horizontal: ['text', 'key', 'status'].includes(c.t) ? 'left' : 'right' },
+      border: { bottom: { style: 'medium', color: { argb: 'FF39FF9C' } } },
     });
-    ws.getRow(r).height = 24;
-    r += 2;
-
-    const ids = s.mine.slice().sort((a, b) => a.post_id.localeCompare(b.post_id, undefined, { numeric: true }) || a.country.localeCompare(b.country));
-    for (const c of ids) {
-      ws.mergeCells(r, 1, r, 5);
-      ws.mergeCells(r, 6, r, N);
-      Object.assign(ws.getCell(r, 1), {
-        value: `POST ID ${c.post_id}   ·   ${c.country}   ·   ${c.n} leitura${c.n === 1 ? '' : 's'}`,
-        font: font({ bold: true, size: 11, color: { argb: 'FF0B3B4A' } }), fill: fill('FFD9F4FA'),
+  });
+  for (let k = 0; k < K; k++) {
+    const c0 = FIXED.length + 1 + k * PER.length;
+    ws.mergeCells(4, c0, 4, c0 + PER.length - 1);
+    Object.assign(g.getCell(c0), {
+      value: k === 0 ? 'ÚLTIMA LEITURA' : k === 1 ? 'ANTERIOR' : `${k + 1}ª MAIS RECENTE`,
+      font: font({ bold: true, size: 9, color: { argb: k === 0 ? 'FF0B3B4A' : 'FF64748B' } }),
+      fill: k % 2 ? light2 : light, alignment: { horizontal: 'center' }, border: sep,
+    });
+    PER.forEach((c, j) => {
+      Object.assign(h.getCell(c0 + j), {
+        value: `${c.h}${k ? ' ' + (k + 1) : ''}`, font: font({ bold: true, size: 9, color: { argb: 'FF64748B' } }),
+        fill: k % 2 ? light2 : light, alignment: { horizontal: ['text', 'action', 'date'].includes(c.t) ? 'left' : 'right' },
+        border: { ...(j === 0 ? sep : {}), bottom: { style: 'medium', color: { argb: 'FF39FF9C' } } },
       });
-      Object.assign(ws.getCell(r, 6), {
-        value: c.status, font: font({ bold: true, size: 11, color: { argb: STATUS_COLOR[c.status] || 'FF64748B' } }),
-        fill: fill('FFD9F4FA'), alignment: { horizontal: 'right' },
-      });
-      r++;
-      HEAD.forEach((h, i) => {
-        Object.assign(ws.getCell(r, i + 1), {
-          value: h, font: font({ bold: true, size: 9, color: { argb: 'FF64748B' } }),
-          alignment: { horizontal: i === 0 || i === N - 1 ? 'left' : 'right' },
-          border: { bottom: { style: 'thin', color: { argb: 'FFB6C2D1' } } },
-        });
-      });
-      r++;
-      for (const x of c.list.slice().reverse()) { // mais recente primeiro
-        const dCpr = x.prev_cpr === null ? null : pctOf(x.cpr, x.prev_cpr);
-        const dCpm = x.prev_cpm === null ? null : pctOf(x.cpm, x.prev_cpm);
-        const vals = [local(x.created_at), x.cpr, x.prev_cpr, dCpr, x.cpm, x.prev_cpm, dCpm, x.note || null];
-        vals.forEach((v, i) => {
-          const cell = ws.getCell(r, i + 1);
-          cell.value = v;
-          cell.font = font({});
-          if (i === 0) { cell.numFmt = 'dd/mm/yyyy hh:mm'; cell.alignment = { horizontal: 'left' }; }
-          else if (i === 3 || i === 6) {
-            cell.numFmt = '+0.0%;-0.0%;0.0%';
-            if (typeof v === 'number') cell.font = font({ bold: true, color: { argb: pctColor(i === 6 ? v : -v) } });
-          } else if (i < 7) cell.numFmt = CUR_FMT[s.currency] || '#,##0.00##';
-        });
-        r++;
-      }
-      r++; // respiro entre IDs
-    }
-    r++; // respiro entre sites
+    });
   }
+  h.height = 20;
+
+  camps.forEach((c, n) => {
+    const row = ws.getRow(6 + n);
+    const zebra = n % 2 ? { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF3F6FA' } } : null;
+    FIXED.forEach((col, i) => {
+      const cell = row.getCell(i + 1);
+      cell.value = c[col.k] === undefined ? null : c[col.k];
+      styleCell(cell, col, c[col.k], c);
+      if (zebra) cell.fill = zebra;
+    });
+    c.list.slice(-K).reverse().forEach((x, k) => {
+      const c0 = FIXED.length + 1 + k * PER.length;
+      const vals = { at: local(x.created_at), cpr: x.cpr, cpm: x.cpm, action: ACTION_LABEL[x.action] || null, by: x.added_by };
+      PER.forEach((col, j) => {
+        const cell = row.getCell(c0 + j);
+        cell.value = vals[col.k];
+        styleCell(cell, col, vals[col.k], c);
+        if (col.t === 'date') cell.numFmt = 'dd/mm/yy hh:mm';
+        if (k === 0 && col.t !== 'action') cell.font = font({ bold: true });
+        else if (k > 0 && col.t !== 'action') cell.font = font({ color: { argb: 'FF475569' } });
+        if (j === 0) cell.border = sep;
+        if (zebra) cell.fill = zebra;
+      });
+    });
+  });
+  if (camps.length) ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: 5 + camps.length, column: N } };
   return ws;
 }
 
 app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
-  const params = [req.uid];
+  const params = [req.owner];
   const where = recordFilters({ ...req.query, latest: undefined }, params);
   const { rows } = await pool.query(
     `${BASE} SELECT * FROM base ${where} ORDER BY lower(site_name), site_id, post_id, country, created_at, id LIMIT 50000`, params);
@@ -501,13 +585,12 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
   // Excel não tem fuso: desloca para o horário local de quem exportou.
   const tzo = Math.min(Math.max(parseInt(req.query.tzo, 10) || 0, -840), 840);
   const local = (d) => (d ? new Date(d.getTime() - tzo * 60000) : null);
-  const now = local(new Date());
-  const stamp = now.toISOString().slice(0, 16).replace('T', ' ');
+  const stamp = local(new Date()).toISOString().slice(0, 16).replace('T', ' ');
 
   // Agrupa: site -> campanha (post + país) -> leituras em ordem cronológica.
   const sites = new Map();
   for (const r of rows) {
-    if (!sites.has(r.site_id)) sites.set(r.site_id, { name: r.site_name, currency: r.currency, camps: new Map(), readings: [] });
+    if (!sites.has(r.site_id)) sites.set(r.site_id, { name: r.site_name, currency: r.currency, owner: r.owner_name, company: r.company, camps: new Map(), readings: [] });
     const s = sites.get(r.site_id);
     const key = r.post_id + '|' + r.country;
     if (!s.camps.has(key)) s.camps.set(key, []);
@@ -515,86 +598,72 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
     s.readings.push(r);
   }
 
-  const campRows = [];
   const summary = [];
+  const camps = [];
+  let maxN = 1;
   for (const s of sites.values()) {
     const mine = [];
     for (const list of s.camps.values()) {
       const last = list[list.length - 1];
-      const cprs = list.map((x) => x.cpr), cpms = list.map((x) => x.cpm);
       const dCpr = last.prev_cpr === null ? null : pctOf(last.cpr, last.prev_cpr);
       const dCpm = last.prev_cpm === null ? null : pctOf(last.cpm, last.prev_cpm);
+      maxN = Math.max(maxN, list.length);
       mine.push({
-        site: s.name, currency: s.currency, post_id: last.post_id, country: last.country, n: list.length,
-        first_at: local(list[0].created_at), last_at: local(last.created_at),
-        cpr: last.cpr, prev_cpr: last.prev_cpr, d_cpr: dCpr, cpr_min: Math.min(...cprs), cpr_max: Math.max(...cprs), cpr_avg: avg(cprs),
-        cpm: last.cpm, prev_cpm: last.prev_cpm, d_cpm: dCpm, cpm_min: Math.min(...cpms), cpm_max: Math.max(...cpms), cpm_avg: avg(cpms),
-        status: statusOf(dCpr, dCpm), note: last.note, list,
+        post_id: last.post_id, country: last.country, site: s.name, company: s.company, owner: s.owner, currency: s.currency,
+        n: list.length, cpr: last.cpr, cpm: last.cpm, d_cpr: dCpr, d_cpm: dCpm, status: statusOf(dCpr, dCpm), list,
       });
     }
-    mine.sort((a, b) => a.cpr - b.cpr);
-    campRows.push(...mine);
-    s.mine = mine;
+    mine.sort((a, b) => a.post_id.localeCompare(b.post_id, undefined, { numeric: true }) || a.country.localeCompare(b.country));
+    camps.push(...mine);
+    const byCpr = mine.slice().sort((a, b) => a.cpr - b.cpr);
     const count = (st) => mine.filter((c) => c.status === st).length;
     const label = (c) => `${c.post_id} · ${c.country}`;
     summary.push({
-      site: s.name, currency: s.currency, moeda: s.currency, camps: mine.length, readings: s.readings.length,
+      site: s.name, company: s.company, owner: s.owner, currency: s.currency, moeda: s.currency, camps: mine.length, readings: s.readings.length,
       cpr_avg: avg(mine.map((c) => c.cpr)), cpm_avg: avg(mine.map((c) => c.cpm)),
       up: count('MELHOROU'), down: count('PIOROU'), mixed: count('MISTO'), flat: count('ESTÁVEL'),
-      best: label(mine[0]), best_cpr: mine[0].cpr, worst: label(mine[mine.length - 1]), worst_cpr: mine[mine.length - 1].cpr,
+      best: label(byCpr[0]), best_cpr: byCpr[0].cpr, worst: label(byCpr[byCpr.length - 1]), worst_cpr: byCpr[byCpr.length - 1].cpr,
       last_at: local(new Date(Math.max(...s.readings.map((r) => r.created_at.getTime())))),
     });
   }
+  const K = Math.min(maxN, MAX_COLS_READINGS);
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'MBZ::PULSE';
   wb.created = new Date();
-  const sub = `gerado em ${stamp} · ${rows.length} leituras · ${campRows.length} campanhas · ${sites.size} sites · verde = melhorou (CPR caiu ou eCPM subiu)`;
+  const sub = `gerado em ${stamp} por ${req.user.name} · ${sites.size} sites · ${camps.length} IDs · ${rows.length} leituras · verde = melhorou (CPR caiu ou eCPM subiu) · status compara a última leitura com a anterior do mesmo ID`;
 
-  addBlocks(wb, sites, sub, local);
+  addIdsSheet(wb, camps, sub + (maxN > K ? ` · até ${K} leituras por linha; o histórico completo está na aba LEITURAS` : ''), local, K);
 
   addSheet(wb, 'RESUMO', sub, [
-    { h: 'SITE', k: 'site', t: 'text', w: 26 }, { h: 'MOEDA', k: 'moeda', t: 'text', w: 8 },
-    { h: 'CAMPANHAS', k: 'camps', t: 'int', w: 12 }, { h: 'LEITURAS', k: 'readings', t: 'int', w: 11 },
+    { h: 'SITE', k: 'site', t: 'key', w: 24 }, { h: 'EMPRESA', k: 'company', t: 'text', w: 13 }, { h: 'GESTOR', k: 'owner', t: 'text', w: 16 },
+    { h: 'MOEDA', k: 'moeda', t: 'text', w: 8 },
+    { h: 'IDs', k: 'camps', t: 'int', w: 8 }, { h: 'LEITURAS', k: 'readings', t: 'int', w: 11 },
     { h: 'CPR MÉDIO ATUAL', k: 'cpr_avg', t: 'cur', w: 18 }, { h: 'eCPM MÉDIO ATUAL', k: 'cpm_avg', t: 'cur', w: 18 },
     { h: 'MELHORARAM', k: 'up', t: 'int', w: 13 }, { h: 'PIORARAM', k: 'down', t: 'int', w: 11 },
     { h: 'MISTAS', k: 'mixed', t: 'int', w: 9 }, { h: 'ESTÁVEIS', k: 'flat', t: 'int', w: 11 },
-    { h: 'MELHOR CPR (POST · PAÍS)', k: 'best', t: 'text', w: 30 }, { h: 'CPR', k: 'best_cpr', t: 'cur', w: 12 },
-    { h: 'PIOR CPR (POST · PAÍS)', k: 'worst', t: 'text', w: 30 }, { h: 'CPR', k: 'worst_cpr', t: 'cur', w: 12 },
+    { h: 'MELHOR CPR (ID · PAÍS)', k: 'best', t: 'text', w: 30 }, { h: 'CPR', k: 'best_cpr', t: 'cur', w: 12 },
+    { h: 'PIOR CPR (ID · PAÍS)', k: 'worst', t: 'text', w: 30 }, { h: 'CPR', k: 'worst_cpr', t: 'cur', w: 12 },
     { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
   ], summary);
 
-  addSheet(wb, 'CAMPANHAS', sub + ' · ordenado por site e CPR atual', [
-    { h: 'SITE', k: 'site', t: 'text', w: 24 }, { h: 'POST ID', k: 'post_id', t: 'text', w: 22 }, { h: 'PAÍS', k: 'country', t: 'text', w: 7 },
-    { h: 'STATUS', k: 'status', t: 'status', w: 13 }, { h: 'LEITURAS', k: 'n', t: 'int', w: 10 },
-    { h: 'CPR ATUAL', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
-    { h: 'CPR MÍN', k: 'cpr_min', t: 'cur', w: 11 }, { h: 'CPR MÁX', k: 'cpr_max', t: 'cur', w: 11 }, { h: 'CPR MÉDIO', k: 'cpr_avg', t: 'cur', w: 12 },
-    { h: 'eCPM ATUAL', k: 'cpm', t: 'cur', w: 12 }, { h: 'eCPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 10 },
-    { h: 'eCPM MÍN', k: 'cpm_min', t: 'cur', w: 11 }, { h: 'eCPM MÁX', k: 'cpm_max', t: 'cur', w: 11 }, { h: 'eCPM MÉDIO', k: 'cpm_avg', t: 'cur', w: 12 },
-    { h: 'PRIMEIRA LEITURA', k: 'first_at', t: 'date', w: 18 }, { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
-    { h: 'ÚLTIMA OBS', k: 'note', t: 'text', w: 40 },
-  ], campRows);
-
-  // Uma aba por site com todas as leituras, da mais recente para a mais antiga.
-  const used = new Set(['POR SITE', 'RESUMO', 'CAMPANHAS']);
-  for (const s of sites.values()) {
-    let base = s.name.replace(/[\[\]:*?\/\\']/g, ' ').trim().slice(0, 28) || 'SITE';
-    let name = base;
-    for (let i = 2; used.has(name.toUpperCase()); i++) name = `${base.slice(0, 25)} (${i})`;
-    used.add(name.toUpperCase());
-    const list = s.readings.slice().sort((a, b) => b.created_at - a.created_at || b.id - a.id).map((r) => ({
-      currency: s.currency, at: local(r.created_at), post_id: r.post_id, country: r.country,
-      cpr: r.cpr, prev_cpr: r.prev_cpr, d_cpr: r.prev_cpr === null ? null : pctOf(r.cpr, r.prev_cpr),
-      cpm: r.cpm, prev_cpm: r.prev_cpm, d_cpm: r.prev_cpm === null ? null : pctOf(r.cpm, r.prev_cpm),
-      note: r.note,
-    }));
-    addSheet(wb, name, `${s.name} · ${s.currency} · ${list.length} leituras · ${s.camps.size} campanhas · gerado em ${stamp}`, [
-      { h: 'DATA / HORA', k: 'at', t: 'date', w: 18 }, { h: 'POST ID', k: 'post_id', t: 'text', w: 22 }, { h: 'PAÍS', k: 'country', t: 'text', w: 7 },
-      { h: 'CPR', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
-      { h: 'eCPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'eCPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 10 },
-      { h: 'OBSERVAÇÃO', k: 'note', t: 'text', w: 44 },
-    ], list);
-  }
+  // Todas as leituras numa lista só, com ID e país na frente, para filtrar.
+  const flat = rows.slice().sort((a, b) => a.site_name.localeCompare(b.site_name) || a.post_id.localeCompare(b.post_id, undefined, { numeric: true })
+    || a.country.localeCompare(b.country) || b.created_at - a.created_at).map((r) => ({
+    currency: r.currency, post_id: r.post_id, country: r.country, site: r.site_name, company: r.company, owner: r.owner_name, by: r.added_by,
+    at: local(r.created_at),
+    cpr: r.cpr, d_cpr: r.prev_cpr === null ? null : pctOf(r.cpr, r.prev_cpr),
+    cpm: r.cpm, d_cpm: r.prev_cpm === null ? null : pctOf(r.cpm, r.prev_cpm),
+    action: ACTION_LABEL[r.action] || null, note: r.note,
+  }));
+  addSheet(wb, 'LEITURAS', sub + ' · mais recente primeiro dentro de cada ID', [
+    { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 }, { h: 'SITE', k: 'site', t: 'text', w: 22 },
+    { h: 'EMPRESA', k: 'company', t: 'text', w: 13 }, { h: 'GESTOR', k: 'owner', t: 'text', w: 16 }, { h: 'ADICIONADO POR', k: 'by', t: 'text', w: 16 },
+    { h: 'DATA / HORA', k: 'at', t: 'date', w: 16 },
+    { h: 'CPR', k: 'cpr', t: 'cur', w: 12 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 9 },
+    { h: 'eCPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 9 },
+    { h: 'AÇÃO', k: 'action', t: 'action', w: 10 }, { h: 'OBSERVAÇÃO', k: 'note', t: 'text', w: 40 },
+  ], flat, 3);
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="mbz-pulse-${stamp.slice(0, 10)}.xlsx"`);
@@ -617,5 +686,11 @@ app.use((err, req, res, next) => {
 });
 
 migrate()
-  .then(() => app.listen(PORT, () => console.log(`[PULSE] online na porta ${PORT}`)))
+  .then(async () => {
+    if (MASTER_EMAILS.length) {
+      const { rowCount } = await pool.query('UPDATE users SET is_master = (email = ANY($1)) WHERE is_master <> (email = ANY($1))', [MASTER_EMAILS]);
+      if (rowCount) console.log(`[PULSE] acesso master ajustado em ${rowCount} conta(s).`);
+    }
+    app.listen(PORT, () => console.log(`[PULSE] online na porta ${PORT}`));
+  })
   .catch((e) => { console.error('[PULSE] falha ao preparar o banco:', e); process.exit(1); });

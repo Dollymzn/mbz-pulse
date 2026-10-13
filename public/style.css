@@ -225,3 +225,28 @@ td.pid { color: var(--cyan); }
 #editNote { color: var(--warn); }
 #recCancel { margin-top: 8px; }
 td .icon + .icon { margin-left: 2px; }
+
+/* ---- empresa / master ---- */
+.badge { font: 700 9px var(--mono); letter-spacing: .16em; color: var(--warn); border: 1px solid var(--warn); padding: 2px 6px; }
+.company-form { border: 1px solid rgba(255, 197, 61, .5); padding: 10px; margin-bottom: 12px; }
+.company-form p { margin: 0 0 8px; color: var(--warn); font-size: 11px; }
+.company-form select { margin: 0; flex: 1; }
+.site-list .nm span i { font-style: normal; color: var(--cyan); }
+
+/* ---- ação (escalei / reduzi / mantive) ---- */
+.field { margin-bottom: 12px; }
+.field .lbl { display: block; font-size: 10px; letter-spacing: .14em; color: var(--dim); }
+.field .lbl small { color: var(--cyan); letter-spacing: 0; margin-left: 6px; }
+.actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 5px; }
+.act {
+  font: 700 10px var(--mono); letter-spacing: .1em; cursor: pointer; padding: 8px 4px;
+  background: #060a11; color: var(--dim); border: 1px solid var(--line); transition: all .15s;
+}
+.act:hover { color: var(--text); border-color: var(--cyan); }
+.act.on[data-action=escalei] { color: var(--cyan); border-color: var(--cyan); background: rgba(25, 227, 255, .1); }
+.act.on[data-action=reduzi] { color: var(--warn); border-color: var(--warn); background: rgba(255, 197, 61, .1); }
+.act.on[data-action=mantive] { color: var(--text); border-color: var(--text); background: rgba(207, 227, 242, .08); }
+.atag { font: 700 9px var(--mono); letter-spacing: .1em; padding: 1px 5px; border: 1px solid currentColor; }
+.atag.escalei { color: var(--cyan); }
+.atag.reduzi { color: var(--warn); }
+.atag.mantive { color: var(--dim); }

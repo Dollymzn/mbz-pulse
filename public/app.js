@@ -29,7 +29,10 @@ function normCountry(input) {
   if (code && plain(input.value).length > 2) input.value = code;
 }
 
-const state = { user: null, sites: [], records: [], total: 0, mode: 'latest', last: null, lastKey: '', seq: 0 };
+const ACTION_LABEL = { escalei: '▲ ESCALEI', reduzi: '▼ REDUZI', mantive: '■ MANTIVE' };
+const state = { user: null, sites: [], users: [], records: [], total: 0, mode: 'latest', last: null, lastKey: '', seq: 0, editing: null };
+let config = { companies: [], actions: [] };
+const isMaster = () => !!(state.user && state.user.is_master);
 
 /* ---------- utilidades ---------- */
 
@@ -100,7 +103,7 @@ function showAuth() {
 function setAuthMode(mode) {
   authMode = mode;
   $$('[data-auth]').forEach((b) => b.classList.toggle('on', b.dataset.auth === mode));
-  $('.only-register').hidden = mode !== 'register';
+  $$('.only-register').forEach((el) => { el.hidden = mode !== 'register'; });
   $('.only-invite').hidden = !(mode === 'register' && inviteRequired);
   $('#authBtn').textContent = mode === 'login' ? 'ACESSAR TERMINAL' : 'CRIAR CONTA';
   $('#authForm [name=password]').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
@@ -115,7 +118,7 @@ $('#authForm').addEventListener('submit', async (e) => {
   btn.disabled = true;
   try {
     const body = { email: f.email.value, password: f.password.value };
-    if (authMode === 'register') { body.name = f.name.value; body.invite = f.invite.value; }
+    if (authMode === 'register') { body.name = f.name.value; body.invite = f.invite.value; body.company = f.company.value; }
     const { user } = await api('/auth/' + authMode, { method: 'POST', body });
     f.reset();
     await enter(user);
@@ -127,17 +130,42 @@ $('#authForm').addEventListener('submit', async (e) => {
 $('#logout').addEventListener('click', async () => {
   await api('/auth/logout', { method: 'POST' }).catch(() => {});
   state.user = null;
+  setAuthMode('login');
   showAuth();
 });
 
 async function enter(user) {
   state.user = user;
-  $('#userName').textContent = user.name;
+  $('#userName').textContent = user.company ? `${user.name} · ${user.company}` : user.name;
+  $('#masterBadge').hidden = !user.is_master;
+  $$('.master-only').forEach((el) => { el.hidden = !user.is_master; });
+  $('#companyForm').hidden = !!user.company;
   $('#auth').hidden = true;
   $('#app').hidden = false;
+  if (user.is_master) await loadUsers();
   await loadSites();
   await loadRecords(true);
   renderCompare();
+}
+
+$('#companyForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  try {
+    const { user } = await api('/me', { method: 'PATCH', body: { company: $('#meCompany').value } });
+    state.user = user;
+    $('#userName').textContent = `${user.name} · ${user.company}`;
+    $('#companyForm').hidden = true;
+    toast(`Empresa definida: ${user.company}.`);
+  } catch (err) { $('#companyErr').textContent = err.message; }
+});
+
+async function loadUsers() {
+  const { users } = await api('/users');
+  state.users = users;
+  const keepC = $('#fCompany').value, keepO = $('#fOwner').value;
+  $('#fCompany').innerHTML = '<option value="">todas as empresas</option>' + config.companies.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+  $('#fOwner').innerHTML = '<option value="">todos os gestores</option>' + users.map((u) => `<option value="${u.id}">${esc(u.name)}${u.company ? ' · ' + esc(u.company) : ''}</option>`).join('');
+  $('#fCompany').value = keepC; $('#fOwner').value = keepO;
 }
 
 /* ---------- sites ---------- */
@@ -152,7 +180,13 @@ function renderSites() {
   const formSel = $('#recForm [name=site_id]');
   const keepForm = formSel.value;
   const keepFilter = $('#fSite').value;
-  const opts = state.sites.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const opt = (s) => `<option value="${s.id}">${esc(s.name)}${isMaster() && s.owner_id !== state.user.id ? ' · ' + esc(s.owner_name) : ''}</option>`;
+  let opts = state.sites.map(opt).join('');
+  if (isMaster()) { // agrupa por gestor
+    const groups = new Map();
+    state.sites.forEach((s) => { const k = `${s.owner_name}${s.company ? ' · ' + s.company : ''}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(s); });
+    opts = [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('')}</optgroup>`).join('');
+  }
   formSel.innerHTML = opts || '<option value="">— cadastre um site —</option>';
   $('#fSite').innerHTML = '<option value="">todos os sites</option>' + opts;
   if (siteById(keepForm)) formSel.value = keepForm;
@@ -162,7 +196,7 @@ function renderSites() {
   $('#siteList').innerHTML = state.sites.length ? state.sites.map((s) => `
     <li data-id="${s.id}" class="${s.id === current ? 'on' : ''}">
       <div class="nm"><b>${esc(s.name)}</b>
-        <span>${s.currency} · ${s.campaigns} camp. · ${s.records} leit.${s.last_at ? ' · ' + ago(s.last_at) : ''}</span></div>
+        <span>${isMaster() && s.owner_id !== state.user.id ? `<i>${esc(s.owner_name)}</i> · ` : ''}${s.currency} · ${s.campaigns} camp. · ${s.records} leit.${s.last_at ? ' · ' + ago(s.last_at) : ''}</span></div>
       <button class="icon" data-act="edit" title="Editar">✎</button>
       <button class="icon del" data-act="del" title="Excluir">✕</button>
     </li>`).join('') : '<li class="empty">Nenhum site ainda. Cadastre o primeiro aqui embaixo ↓</li>';
@@ -329,7 +363,7 @@ function renderCompare() {
   box.innerHTML = keyLine +
     `<div class="verdict ${v.cls}">${v.text}<small>${refNote}</small></div>
      <div class="metrics">${metric('CPR', cpr, ref.cpr, dCpr)}${metric('eCPM', cpm, ref.cpm, dCpm)}</div>` +
-    (ref.note ? `<div class="cmp-key" style="margin-top:12px">obs. anterior: <b>${esc(ref.note)}</b></div>` : '') +
+    (ref.action || ref.note ? `<div class="cmp-key" style="margin-top:12px">${ref.action ? `ação anterior: <b>${ACTION_LABEL[ref.action]}</b>` : ''}${ref.action && ref.note ? ' · ' : ''}${ref.note ? `obs. anterior: <b>${esc(ref.note)}</b>` : ''}</div>` : '') +
     sparkline(data.series, 'cpr', cpr) + sparkline(data.series, 'cpm', cpm);
 }
 
@@ -337,6 +371,15 @@ rf.site_id.addEventListener('change', () => { renderSites(); refreshLast(true); 
 rf.post_id.addEventListener('input', () => refreshLast());
 rf.country.addEventListener('input', () => { normCountry(rf.country); refreshLast(); });
 rf.cpr.addEventListener('input', renderCompare);
+function setAction(a) {
+  rf.action.value = a || '';
+  $$('#actions .act').forEach((b) => b.classList.toggle('on', b.dataset.action === a));
+}
+$('#actions').addEventListener('click', (e) => {
+  const b = e.target.closest('.act');
+  if (!b) return;
+  setAction(rf.action.value === b.dataset.action ? '' : b.dataset.action); // clica de novo para desmarcar
+});
 rf.cpm.addEventListener('input', renderCompare);
 
 rf.addEventListener('submit', async (e) => {
@@ -353,12 +396,12 @@ rf.addEventListener('submit', async (e) => {
     const tag = editing ? 'CORRIGIDO' : 'GRAVADO';
     const { record, previous } = await api(editing ? '/records/' + editing : '/records', {
       method: editing ? 'PATCH' : 'POST',
-      body: { ...k, cpr: rf.cpr.value, cpm: rf.cpm.value, note: rf.note.value },
+      body: { ...k, cpr: rf.cpr.value, cpm: rf.cpm.value, note: rf.note.value, action: rf.action.value },
     });
     const d = previous ? delta(record.cpr, previous.cpr) : null;
     toast(d ? `${tag} · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : `${tag} · primeira leitura desta campanha`);
     if (editing) setEditing(null);
-    rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = '';
+    rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = ''; setAction('');
     await Promise.all([loadSites(), loadRecords(true, record.id)]);
     await fetchLast();
     rf.cpr.focus();
@@ -379,7 +422,7 @@ function setEditing(r) {
 }
 function cancelEdit() {
   setEditing(null);
-  rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = '';
+  rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = ''; setAction('');
   $('#recErr').textContent = '';
   refreshLast(true);
 }
@@ -393,6 +436,9 @@ function filterQuery() {
   const c = $('#fCountry').value.trim().toUpperCase();
   if (/^[A-Z]{2}$/.test(c)) q.set('country', c);
   if ($('#fPost').value.trim()) q.set('post_id', $('#fPost').value.trim());
+  if ($('#fAction').value) q.set('action', $('#fAction').value);
+  if (isMaster() && $('#fCompany').value) q.set('company', $('#fCompany').value);
+  if (isMaster() && $('#fOwner').value) q.set('owner_id', $('#fOwner').value);
   if (state.mode === 'latest') q.set('latest', '1');
   return q;
 }
@@ -418,14 +464,16 @@ function renderRecords(flashId) {
     <tr data-id="${r.id}" class="${r.id === String(flashId) || r.id === flashId ? 'flash' : ''}" title="Clique para lançar nova leitura desta campanha">
       <td title="${esc(new Date(r.created_at).toLocaleString('pt-BR'))}">${when(r.created_at)} <span class="dim">· ${ago(r.created_at)}</span></td>
       <td>${esc(r.site_name)}</td>
+      ${isMaster() ? `<td class="dim" title="gravado por ${esc(r.added_by)}">${esc(r.owner_name)}</td>` : ''}
       <td class="pid">${esc(r.post_id)}${state.mode === 'latest' && r.readings > 1 ? `<span class="tag">${r.readings}×</span>` : ''}</td>
       <td>${flag(r.country)} ${esc(r.country)}</td>
       <td class="num">${money(r.cpr, r.currency)}</td>${dcell(r.cpr, r.prev_cpr)}
       <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm, true)}
+      <td>${r.action ? `<span class="atag ${esc(r.action)}">${ACTION_LABEL[r.action]}</span>` : ''}</td>
       <td class="obs" title="${esc(r.note)}">${esc(r.note)}</td>
       <td><button class="icon" data-act="edit" title="Corrigir esta leitura">✎</button><button class="icon del" data-act="del" title="Apagar esta leitura">✕</button></td>
     </tr>`).join('')
-    : `<tr><td colspan="10" class="empty">Nenhuma leitura ${filterQuery().toString().replace('latest=1', '') ? 'com esses filtros' : 'ainda — grave a primeira no painel 02'}.</td></tr>`;
+    : `<tr><td colspan="12" class="empty">Nenhuma leitura ${filterQuery().toString().replace('latest=1', '') ? 'com esses filtros' : 'ainda — grave a primeira no painel 02'}.</td></tr>`;
   $('#histCount').textContent = state.total ? `${state.records.length} de ${state.total}` : '';
   $('#more').hidden = state.records.length >= state.total;
 
@@ -454,6 +502,7 @@ $('#rows').addEventListener('click', async (e) => {
   rf.cpr.value = edit ? String(r.cpr).replace('.', ',') : '';
   rf.cpm.value = edit ? String(r.cpm).replace('.', ',') : '';
   rf.note.value = edit ? r.note : '';
+  setAction(edit ? r.action : '');
   rf.site_id.value = r.site_id;
   rf.post_id.value = r.post_id;
   rf.country.value = r.country;
@@ -474,7 +523,10 @@ const refilter = () => { clearTimeout(fTimer); fTimer = setTimeout(() => loadRec
 $('#fSite').addEventListener('change', refilter);
 $('#fCountry').addEventListener('input', () => { normCountry($('#fCountry')); refilter(); });
 $('#fPost').addEventListener('input', refilter);
-$('#fClear').addEventListener('click', () => { $('#fSite').value = ''; $('#fCountry').value = ''; $('#fPost').value = ''; loadRecords(true); });
+$('#fAction').addEventListener('change', refilter);
+$('#fCompany').addEventListener('change', refilter);
+$('#fOwner').addEventListener('change', refilter);
+$('#fClear').addEventListener('click', () => { ['#fSite', '#fCountry', '#fPost', '#fAction', '#fCompany', '#fOwner'].forEach((id) => { $(id).value = ''; }); loadRecords(true); });
 $('#more').addEventListener('click', () => loadRecords(false));
 $('#xlsx').addEventListener('click', () => {
   const q = filterQuery(); q.delete('latest'); q.set('tzo', new Date().getTimezoneOffset());
@@ -487,7 +539,13 @@ $('#csv').addEventListener('click', () => { window.location.href = '/api/records
 $('#countries').innerHTML = COUNTRIES.map((c) => `<option value="${c.code}">${esc(c.name)}</option>`).join('');
 
 (async () => {
-  try { inviteRequired = (await api('/config')).invite_required; } catch { /* segue */ }
+  try {
+    config = await api('/config');
+    inviteRequired = config.invite_required;
+    const opts = config.companies.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    $('#authCompany').innerHTML = opts;
+    $('#meCompany').innerHTML = opts;
+  } catch { /* segue */ }
   setAuthMode('login');
   try {
     const { user } = await api('/me');

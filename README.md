@@ -4,7 +4,9 @@ Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é com
 
 ## O que faz
 
-- **Contas isoladas** — login por e-mail/senha; ninguém vê site ou leitura de outro usuário.
+- **Contas isoladas** — login por e-mail/senha com empresa (TN Digitech ou Moodlr); cada gestor vê só os próprios sites.
+- **Usuário master** — e-mails em `MASTER_EMAILS` veem os sites e leituras de todos, com filtro por empresa e por gestor.
+- **Ação por leitura** — cada leitura pode marcar ESCALEI / REDUZI / MANTIVE; a exportação registra também quem gravou.
 - **Sites por usuário** — nome, URL e moeda (USD, BRL, EUR).
 - **Comparação ao vivo** — ao preencher site + país + post id, o último registro aparece; ao digitar CPR/eCPM, a variação e o veredito (MELHOROU / PIOROU / MISTO / ESTÁVEL) atualizam a cada tecla, antes de gravar.
 - **Só ID contra o mesmo ID** — um post sem histórico aparece como primeira leitura; nunca é comparado com outro post do site.
@@ -21,6 +23,7 @@ Regra de cor: **CPR caindo é verde** (custo) e **eCPM subindo é verde** (recei
 4. No serviço do app, aba **Variables**:
    - `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`
    - `JWT_SECRET` = uma string longa e aleatória
+   - `MASTER_EMAILS` = e-mail(s) com acesso master, separados por vírgula
    - `INVITE_CODE` = (opcional, recomendado) código exigido para criar conta
 5. **Settings → Networking → Generate Domain**.
 
@@ -40,6 +43,7 @@ node --env-file=.env server.js
 |---|---|---|
 | `DATABASE_URL` | sim | Postgres |
 | `JWT_SECRET` | sim em produção | assina a sessão (cookie httpOnly, 30 dias) |
+| `MASTER_EMAILS` | não | e-mails com acesso master (todos os sites, filtros por empresa e gestor) |
 | `INVITE_CODE` | não | trava o cadastro para quem tem o código |
 | `PGSSL` | não | `true` se conectar pela URL pública do Postgres |
 

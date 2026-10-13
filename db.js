@@ -47,6 +47,12 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS records_key_idx
       ON records (user_id, site_id, post_id, country, created_at DESC);
+
+    -- evoluções de esquema (idempotentes)
+    ALTER TABLE users   ADD COLUMN IF NOT EXISTS company   TEXT    NOT NULL DEFAULT '';
+    ALTER TABLE users   ADD COLUMN IF NOT EXISTS is_master BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE records ADD COLUMN IF NOT EXISTS action    TEXT    NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS records_site_key_idx ON records (site_id, post_id, country, created_at DESC);
   `);
 }
 

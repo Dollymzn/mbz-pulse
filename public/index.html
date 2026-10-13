@@ -26,6 +26,7 @@
     </div>
     <form id="authForm" autocomplete="on">
       <label class="only-register" hidden>NOME<input name="name" maxlength="60" autocomplete="name"></label>
+      <label class="only-register" hidden>EMPRESA<select name="company" id="authCompany"></select></label>
       <label>E-MAIL<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
       <label>SENHA<input name="password" type="password" required minlength="8" maxlength="100" autocomplete="current-password"></label>
       <label class="only-invite" hidden>CÓDIGO DE CONVITE<input name="invite" maxlength="100" autocomplete="off"></label>
@@ -41,6 +42,7 @@
     <div class="logo">MBZ<span>::</span>PULSE</div>
     <div class="top-right">
       <span class="live"><i></i>ONLINE</span>
+      <span id="masterBadge" class="badge" hidden title="Vê os sites e leituras de todos os gestores">MASTER</span>
       <span id="userName" class="user"></span>
       <button class="btn ghost sm" id="logout">SAIR</button>
     </div>
@@ -50,6 +52,14 @@
     <!-- SITES -->
     <aside class="panel sites">
       <h2><b>01</b> MEUS SITES</h2>
+      <form id="companyForm" class="company-form" hidden>
+        <p>Sua conta ainda não tem empresa. Escolha para continuar:</p>
+        <div class="row">
+          <select name="company" id="meCompany"></select>
+          <button class="btn sm" type="submit">SALVAR</button>
+        </div>
+        <p class="msg err" id="companyErr"></p>
+      </form>
       <ul id="siteList" class="site-list"></ul>
       <form id="siteForm" class="site-form">
         <input type="hidden" name="id">
@@ -85,6 +95,15 @@
           <label>CPR <small id="curCpr"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required></label>
           <label>eCPM <small id="curCpm"></small><input name="cpm" inputmode="decimal" placeholder="0,00" required></label>
         </div>
+        <div class="field">
+          <span class="lbl">O QUE VOCÊ FEZ <small>opcional</small></span>
+          <div class="actions" id="actions">
+            <button type="button" class="act" data-action="escalei">▲ ESCALEI</button>
+            <button type="button" class="act" data-action="reduzi">▼ REDUZI</button>
+            <button type="button" class="act" data-action="mantive">■ MANTIVE</button>
+          </div>
+          <input type="hidden" name="action" value="">
+        </div>
         <label>OBSERVAÇÃO <small>opcional</small><input name="note" maxlength="280" placeholder="ex.: troquei criativo, subi orçamento"></label>
         <p class="msg err" id="recErr"></p>
         <p class="msg" id="editNote" hidden></p>
@@ -110,21 +129,29 @@
         </div>
       </div>
       <div class="filters">
+        <select id="fCompany" class="master-only" hidden></select>
+        <select id="fOwner" class="master-only" hidden></select>
         <select id="fSite"></select>
         <input id="fCountry" placeholder="país" maxlength="40" class="upper" list="countries">
         <input id="fPost" placeholder="buscar post id">
+        <select id="fAction">
+          <option value="">qualquer ação</option>
+          <option value="escalei">escalei</option>
+          <option value="reduzi">reduzi</option>
+          <option value="mantive">mantive</option>
+        </select>
         <button class="btn ghost sm" id="fClear">LIMPAR</button>
         <span class="spacer"></span>
         <span id="histCount" class="dim"></span>
         <button class="btn ghost sm" id="csv">CSV</button>
-        <button class="btn sm" id="xlsx" title="Planilha com resumo por site, campanhas e todas as leituras com horário">EXPORTAR EXCEL</button>
+        <button class="btn sm" id="xlsx" title="Planilha com uma linha por ID, resumo por site e todas as leituras">EXPORTAR EXCEL</button>
       </div>
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>QUANDO</th><th>SITE</th><th>POST ID</th><th>PAÍS</th>
+            <th>QUANDO</th><th>SITE</th><th class="master-only" hidden>GESTOR</th><th>POST ID</th><th>PAÍS</th>
             <th class="r">CPR</th><th class="r">Δ CPR</th><th class="r">eCPM</th><th class="r">Δ eCPM</th>
-            <th>OBS</th><th></th>
+            <th>AÇÃO</th><th>OBS</th><th></th>
           </tr></thead>
           <tbody id="rows"></tbody>
         </table>
