@@ -253,7 +253,7 @@ async function fetchLast() {
   }
   const seq = ++state.seq;
   try {
-    const data = await api(`/records/last?site_id=${k.site_id}&post_id=${encodeURIComponent(k.post_id)}&country=${k.country}`);
+    const data = await api(`/records/last?site_id=${k.site_id}&post_id=${encodeURIComponent(k.post_id)}&country=${k.country}${state.editing ? '&exclude_id=' + state.editing : ''}`);
     if (seq !== state.seq) return; // chegou resposta antiga
     state.last = data; state.lastKey = key;
   } catch { if (seq === state.seq) state.last = null; }
@@ -291,14 +291,14 @@ function renderCompare() {
     return;
   }
   const data = state.last || {};
-  const ref = data.exact || data.fallback;
+  const ref = data.exact; // só compara o ID com ele mesmo
   const cpr = parseNum(rf.cpr.value);
   const cpm = parseNum(rf.cpm.value);
   const cur = site.currency;
   const keyLine = `<div class="cmp-key"><b>${esc(site.name)}</b> · ${flag(k.country)} <b>${esc(k.country)}</b> · post <b>${esc(k.post_id)}</b></div>`;
 
   if (!ref) {
-    box.innerHTML = keyLine + `<div class="verdict flat">PRIMEIRA LEITURA<small>Nada gravado para ${esc(site.name)} em ${esc(k.country)}. Esta leitura vira a base de comparação.</small></div>
+    box.innerHTML = keyLine + `<div class="verdict flat">PRIMEIRA LEITURA<small>Este ID ainda não tem leitura em ${esc(k.country)} neste site. Esta leitura vira a base de comparação dele.</small></div>
       <div class="metrics">
         <div class="metric"><div class="lbl">CPR</div><div class="now">${money(cpr, cur)}</div></div>
         <div class="metric"><div class="lbl">eCPM</div><div class="now">${money(cpm, cur)}</div></div>
@@ -318,9 +318,7 @@ function renderCompare() {
     else if (set.includes('good')) v = { cls: 'good', text: 'MELHOROU' };
     else v = { cls: 'flat', text: 'ESTÁVEL' };
   }
-  const refNote = data.exact
-    ? `vs. último registro deste post · ${ago(ref.created_at)} (${when(ref.created_at)})`
-    : `post novo — comparando com a última leitura do site em ${esc(k.country)}: post ${esc(ref.post_id)} · ${ago(ref.created_at)}`;
+  const refNote = `vs. último registro deste post · ${ago(ref.created_at)} (${when(ref.created_at)})`;
   const metric = (lbl, now, was, d) => `
     <div class="metric"><div class="lbl">${lbl}</div>
       <div class="now">${money(now, cur)}</div>
@@ -332,7 +330,7 @@ function renderCompare() {
     `<div class="verdict ${v.cls}">${v.text}<small>${refNote}</small></div>
      <div class="metrics">${metric('CPR', cpr, ref.cpr, dCpr)}${metric('eCPM', cpm, ref.cpm, dCpm)}</div>` +
     (ref.note ? `<div class="cmp-key" style="margin-top:12px">obs. anterior: <b>${esc(ref.note)}</b></div>` : '') +
-    (data.exact ? sparkline(data.series, 'cpr', cpr) + sparkline(data.series, 'cpm', cpm) : '');
+    sparkline(data.series, 'cpr', cpr) + sparkline(data.series, 'cpm', cpm);
 }
 
 rf.site_id.addEventListener('change', () => { renderSites(); refreshLast(true); });
@@ -351,12 +349,15 @@ rf.addEventListener('submit', async (e) => {
   const btn = $('#recBtn');
   btn.disabled = true;
   try {
-    const { record, previous } = await api('/records', {
-      method: 'POST',
+    const editing = state.editing;
+    const tag = editing ? 'CORRIGIDO' : 'GRAVADO';
+    const { record, previous } = await api(editing ? '/records/' + editing : '/records', {
+      method: editing ? 'PATCH' : 'POST',
       body: { ...k, cpr: rf.cpr.value, cpm: rf.cpm.value, note: rf.note.value },
     });
     const d = previous ? delta(record.cpr, previous.cpr) : null;
-    toast(d ? `GRAVADO · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : 'GRAVADO · primeira leitura desta campanha');
+    toast(d ? `${tag} · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : `${tag} · primeira leitura desta campanha`);
+    if (editing) setEditing(null);
     rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = '';
     await Promise.all([loadSites(), loadRecords(true, record.id)]);
     await fetchLast();
@@ -364,6 +365,25 @@ rf.addEventListener('submit', async (e) => {
   } catch (ex) { err.textContent = ex.message; }
   finally { btn.disabled = false; }
 });
+
+/* ---------- correção de leitura ---------- */
+
+function setEditing(r) {
+  state.editing = r ? r.id : null;
+  $('#recBtn').innerHTML = r ? 'SALVAR CORREÇÃO <kbd>ENTER</kbd>' : 'GRAVAR LEITURA <kbd>ENTER</kbd>';
+  $('#recCancel').hidden = !r;
+  $('#editNote').hidden = !r;
+  $('#editNote').textContent = r ? `Corrigindo a leitura de ${when(r.created_at)}. A data e a hora originais são mantidas.` : '';
+  $('.entry').classList.toggle('editing', !!r);
+  $('.entry h2').innerHTML = r ? '<b>02</b> CORRIGIR LEITURA' : '<b>02</b> NOVA LEITURA';
+}
+function cancelEdit() {
+  setEditing(null);
+  rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = '';
+  $('#recErr').textContent = '';
+  refreshLast(true);
+}
+$('#recCancel').addEventListener('click', cancelEdit);
 
 /* ---------- histórico ---------- */
 
@@ -403,7 +423,7 @@ function renderRecords(flashId) {
       <td class="num">${money(r.cpr, r.currency)}</td>${dcell(r.cpr, r.prev_cpr)}
       <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm, true)}
       <td class="obs" title="${esc(r.note)}">${esc(r.note)}</td>
-      <td><button class="icon del" data-act="del" title="Apagar esta leitura">✕</button></td>
+      <td><button class="icon" data-act="edit" title="Corrigir esta leitura">✎</button><button class="icon del" data-act="del" title="Apagar esta leitura">✕</button></td>
     </tr>`).join('')
     : `<tr><td colspan="10" class="empty">Nenhuma leitura ${filterQuery().toString().replace('latest=1', '') ? 'com esses filtros' : 'ainda — grave a primeira no painel 02'}.</td></tr>`;
   $('#histCount').textContent = state.total ? `${state.records.length} de ${state.total}` : '';
@@ -422,12 +442,18 @@ $('#rows').addEventListener('click', async (e) => {
     if (!confirm(`Apagar a leitura de ${when(r.created_at)} (post ${r.post_id}, ${r.country})?`)) return;
     try {
       await api('/records/' + r.id, { method: 'DELETE' });
+      if (state.editing === r.id) cancelEdit();
       await Promise.all([loadSites(), loadRecords(true)]);
       refreshLast(true);
       toast('Leitura apagada.');
     } catch (err) { toast(err.message, true); }
     return;
   }
+  const edit = e.target.dataset.act === 'edit';
+  setEditing(edit ? r : null);
+  rf.cpr.value = edit ? String(r.cpr).replace('.', ',') : '';
+  rf.cpm.value = edit ? String(r.cpm).replace('.', ',') : '';
+  rf.note.value = edit ? r.note : '';
   rf.site_id.value = r.site_id;
   rf.post_id.value = r.post_id;
   rf.country.value = r.country;

@@ -217,3 +217,11 @@ td.pid { color: var(--cyan); }
   .live { display: none; }
   #fPost { width: 100%; }
 }
+
+/* ---- modo correção ---- */
+.entry.editing { border-color: rgba(255, 197, 61, .55); }
+.entry.editing::before { background: var(--warn); box-shadow: 0 0 10px var(--warn); }
+.entry.editing h2 { color: var(--warn); }
+#editNote { color: var(--warn); }
+#recCancel { margin-top: 8px; }
+td .icon + .icon { margin-left: 2px; }

@@ -265,26 +265,23 @@ app.get('/api/records', auth, wrap(async (req, res) => {
   res.json({ records: rows, total });
 }));
 
-// Último registro da chave exata + fallback (mesmo site e país) + série para o gráfico.
+// Último registro da mesma campanha (site + post + país) + série para o gráfico.
+// Nunca compara com outro post: cada ID é uma campanha com público e anunciantes próprios.
 app.get('/api/records/last', auth, wrap(async (req, res) => {
   const siteId = intId(req.query.site_id, 'Site');
   const postId = String(req.query.post_id || '').trim();
   const c = req.query.country ? country(req.query.country) : null;
+  // Ao corrigir uma leitura, compara só com o que veio antes dela.
+  const ex = req.query.exclude_id ? intId(req.query.exclude_id) : null;
+  const exSql = ex ? ` AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=${ex} AND user_id=$1)` : '';
   let exact = null, fallback = null, series = [];
   if (postId && c) {
     const r = await pool.query(
       `SELECT id, post_id, country, cpr, cpm, note, created_at FROM records
-       WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4
+       WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4${exSql}
        ORDER BY created_at DESC, id DESC LIMIT 30`, [req.uid, siteId, postId, c]);
     series = r.rows.map(({ cpr, cpm, created_at }) => ({ cpr, cpm, created_at })).reverse();
     exact = r.rows[0] || null;
-  }
-  if (!exact && c) {
-    const r = await pool.query(
-      `SELECT id, post_id, country, cpr, cpm, note, created_at FROM records
-       WHERE user_id=$1 AND site_id=$2 AND country=$3
-       ORDER BY created_at DESC, id DESC LIMIT 1`, [req.uid, siteId, c]);
-    fallback = r.rows[0] || null;
   }
   res.json({ exact, fallback, series });
 }));
@@ -308,6 +305,26 @@ app.post('/api/records', auth, wrap(async (req, res) => {
      RETURNING id, site_id, post_id, country, cpr, cpm, note, created_at`,
     [req.uid, site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note]);
   res.status(201).json({ record: rows[0], previous: prev.rows[0] || null });
+}));
+
+// Corrige uma leitura já gravada. A data original é mantida.
+app.patch('/api/records/:id', auth, wrap(async (req, res) => {
+  const id = intId(req.params.id);
+  const site = await ownSite(req.uid, intId(req.body.site_id, 'Site'));
+  const { rows } = await pool.query(
+    `UPDATE records SET site_id=$1, post_id=$2, country=$3, cpr=$4, cpm=$5, note=$6
+     WHERE id=$7 AND user_id=$8
+     RETURNING id, site_id, post_id, country, cpr, cpm, note, created_at`,
+    [site.id, str(req.body.post_id, 80, 'Post ID'), country(req.body.country),
+      money(req.body.cpr, 'CPR'), money(req.body.cpm, 'eCPM'),
+      str(req.body.note, 280, 'Observação', { required: false }), id, req.uid]);
+  if (!rows[0]) throw new HttpError(404, 'Registro não encontrado.');
+  const prev = await pool.query(
+    `SELECT cpr, cpm, created_at FROM records
+     WHERE user_id=$1 AND site_id=$2 AND post_id=$3 AND country=$4
+       AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=$5)
+     ORDER BY created_at DESC, id DESC LIMIT 1`, [req.uid, site.id, rows[0].post_id, rows[0].country, id]);
+  res.json({ record: rows[0], previous: prev.rows[0] || null });
 }));
 
 app.delete('/api/records/:id', auth, wrap(async (req, res) => {

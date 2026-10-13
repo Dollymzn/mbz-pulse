@@ -7,7 +7,7 @@ Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é com
 - **Contas isoladas** — login por e-mail/senha; ninguém vê site ou leitura de outro usuário.
 - **Sites por usuário** — nome, URL e moeda (USD, BRL, EUR).
 - **Comparação ao vivo** — ao preencher site + país + post id, o último registro aparece; ao digitar CPR/eCPM, a variação e o veredito (MELHOROU / PIOROU / MISTO / ESTÁVEL) atualizam a cada tecla, antes de gravar.
-- **Post novo** — sem histórico do post, compara com a última leitura do mesmo site e país (e avisa que é esse o caso).
+- **Só ID contra o mesmo ID** — um post sem histórico aparece como primeira leitura; nunca é comparado com outro post do site.
 - **Histórico** — visão *por campanha* (última leitura de cada uma) ou *todas as leituras*, com Δ contra a leitura anterior, filtros e exportação CSV.
 - **Atalho** — clicar numa linha do histórico preenche o formulário para lançar a próxima leitura daquela campanha.
 
