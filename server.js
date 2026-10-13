@@ -295,7 +295,7 @@ app.post('/api/records', auth, wrap(async (req, res) => {
     post_id: str(req.body.post_id, 80, 'Post ID'),
     country: country(req.body.country),
     cpr: money(req.body.cpr, 'CPR'),
-    cpm: money(req.body.cpm, 'CPM'),
+    cpm: money(req.body.cpm, 'eCPM'),
     note: str(req.body.note, 280, 'Observação', { required: false }),
   };
   const prev = await pool.query(
@@ -327,7 +327,7 @@ app.get('/api/records/export.csv', auth, wrap(async (req, res) => {
     return '"' + s.replace(/"/g, '""') + '"';
   };
   const pct = (a, b) => (b ? (((a - b) / b) * 100).toFixed(2) : '');
-  const lines = [['data', 'site', 'post_id', 'pais', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'cpm', 'cpm_anterior', 'cpm_var_pct', 'observacao'].join(',')];
+  const lines = [['data', 'site', 'post_id', 'pais', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'ecpm', 'ecpm_anterior', 'ecpm_var_pct', 'observacao'].join(',')];
   for (const r of rows) {
     lines.push([
       r.created_at.toISOString(), r.site_name, r.post_id, r.country, r.currency,
@@ -348,8 +348,9 @@ const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length;
 
 function statusOf(dCpr, dCpm) {
   if (dCpr === null && dCpm === null) return '1ª LEITURA';
-  const cls = (d) => (d === null ? null : d < -FLAT_PCT ? 'good' : d > FLAT_PCT ? 'bad' : 'flat');
-  const set = [cls(dCpr), cls(dCpm)];
+  // gain > 0 = melhorou. CPR é custo (cair é bom); eCPM é receita (subir é bom).
+  const cls = (gain) => (gain === null ? null : gain > FLAT_PCT ? 'good' : gain < -FLAT_PCT ? 'bad' : 'flat');
+  const set = [cls(dCpr === null ? null : -dCpr), cls(dCpm)];
   if (set.includes('good') && set.includes('bad')) return 'MISTO';
   if (set.includes('bad')) return 'PIOROU';
   if (set.includes('good')) return 'MELHOROU';
@@ -390,7 +391,8 @@ function addSheet(wb, name, subtitle, cols, rows) {
       else if (c.t === 'pct') {
         cell.numFmt = '+0.0%;-0.0%;0.0%';
         if (typeof v === 'number') {
-          cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: v < -FLAT_PCT ? 'FF12824C' : v > FLAT_PCT ? 'FFD81B60' : 'FF64748B' } };
+          const gain = c.up ? v : -v;
+          cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: gain > FLAT_PCT ? 'FF12824C' : gain < -FLAT_PCT ? 'FFD81B60' : 'FF64748B' } };
         }
       } else if (c.t === 'status' && v) {
         cell.font = { name: 'Consolas', size: 10, bold: true, color: { argb: STATUS_COLOR[v] || 'FF64748B' } };
@@ -458,12 +460,12 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'MBZ::PULSE';
   wb.created = new Date();
-  const sub = `gerado em ${stamp} · ${rows.length} leituras · ${campRows.length} campanhas · ${sites.size} sites · variação: negativa = custo caiu (bom)`;
+  const sub = `gerado em ${stamp} · ${rows.length} leituras · ${campRows.length} campanhas · ${sites.size} sites · verde = melhorou (CPR caiu ou eCPM subiu)`;
 
   addSheet(wb, 'RESUMO', sub, [
     { h: 'SITE', k: 'site', t: 'text', w: 26 }, { h: 'MOEDA', k: 'moeda', t: 'text', w: 8 },
     { h: 'CAMPANHAS', k: 'camps', t: 'int', w: 12 }, { h: 'LEITURAS', k: 'readings', t: 'int', w: 11 },
-    { h: 'CPR MÉDIO ATUAL', k: 'cpr_avg', t: 'cur', w: 18 }, { h: 'CPM MÉDIO ATUAL', k: 'cpm_avg', t: 'cur', w: 18 },
+    { h: 'CPR MÉDIO ATUAL', k: 'cpr_avg', t: 'cur', w: 18 }, { h: 'eCPM MÉDIO ATUAL', k: 'cpm_avg', t: 'cur', w: 18 },
     { h: 'MELHORARAM', k: 'up', t: 'int', w: 13 }, { h: 'PIORARAM', k: 'down', t: 'int', w: 11 },
     { h: 'MISTAS', k: 'mixed', t: 'int', w: 9 }, { h: 'ESTÁVEIS', k: 'flat', t: 'int', w: 11 },
     { h: 'MELHOR CPR (POST · PAÍS)', k: 'best', t: 'text', w: 30 }, { h: 'CPR', k: 'best_cpr', t: 'cur', w: 12 },
@@ -476,8 +478,8 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
     { h: 'STATUS', k: 'status', t: 'status', w: 13 }, { h: 'LEITURAS', k: 'n', t: 'int', w: 10 },
     { h: 'CPR ATUAL', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
     { h: 'CPR MÍN', k: 'cpr_min', t: 'cur', w: 11 }, { h: 'CPR MÁX', k: 'cpr_max', t: 'cur', w: 11 }, { h: 'CPR MÉDIO', k: 'cpr_avg', t: 'cur', w: 12 },
-    { h: 'CPM ATUAL', k: 'cpm', t: 'cur', w: 12 }, { h: 'CPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ CPM', k: 'd_cpm', t: 'pct', w: 10 },
-    { h: 'CPM MÍN', k: 'cpm_min', t: 'cur', w: 11 }, { h: 'CPM MÁX', k: 'cpm_max', t: 'cur', w: 11 }, { h: 'CPM MÉDIO', k: 'cpm_avg', t: 'cur', w: 12 },
+    { h: 'eCPM ATUAL', k: 'cpm', t: 'cur', w: 12 }, { h: 'eCPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 10 },
+    { h: 'eCPM MÍN', k: 'cpm_min', t: 'cur', w: 11 }, { h: 'eCPM MÁX', k: 'cpm_max', t: 'cur', w: 11 }, { h: 'eCPM MÉDIO', k: 'cpm_avg', t: 'cur', w: 12 },
     { h: 'PRIMEIRA LEITURA', k: 'first_at', t: 'date', w: 18 }, { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
     { h: 'ÚLTIMA OBS', k: 'note', t: 'text', w: 40 },
   ], campRows);
@@ -498,7 +500,7 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
     addSheet(wb, name, `${s.name} · ${s.currency} · ${list.length} leituras · ${s.camps.size} campanhas · gerado em ${stamp}`, [
       { h: 'DATA / HORA', k: 'at', t: 'date', w: 18 }, { h: 'POST ID', k: 'post_id', t: 'text', w: 22 }, { h: 'PAÍS', k: 'country', t: 'text', w: 7 },
       { h: 'CPR', k: 'cpr', t: 'cur', w: 12 }, { h: 'CPR ANTERIOR', k: 'prev_cpr', t: 'cur', w: 14 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 10 },
-      { h: 'CPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'CPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ CPM', k: 'd_cpm', t: 'pct', w: 10 },
+      { h: 'eCPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'eCPM ANTERIOR', k: 'prev_cpm', t: 'cur', w: 14 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 10 },
       { h: 'OBSERVAÇÃO', k: 'note', t: 'text', w: 44 },
     ], list);
   }

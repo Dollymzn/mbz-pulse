@@ -1,17 +1,17 @@
 # MBZ::PULSE
 
-Rastreador de **CPR / CPM por post, país e site**. Cada leitura gravada é comparada na hora com o último registro da mesma campanha (site + post id + país). Cada usuário tem a própria conta, os próprios sites e o próprio histórico.
+Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é comparada na hora com o último registro da mesma campanha (site + post id + país). Cada usuário tem a própria conta, os próprios sites e o próprio histórico.
 
 ## O que faz
 
 - **Contas isoladas** — login por e-mail/senha; ninguém vê site ou leitura de outro usuário.
 - **Sites por usuário** — nome, URL e moeda (USD, BRL, EUR).
-- **Comparação ao vivo** — ao preencher site + país + post id, o último registro aparece; ao digitar CPR/CPM, a variação e o veredito (MELHOROU / PIOROU / MISTO / ESTÁVEL) atualizam a cada tecla, antes de gravar.
+- **Comparação ao vivo** — ao preencher site + país + post id, o último registro aparece; ao digitar CPR/eCPM, a variação e o veredito (MELHOROU / PIOROU / MISTO / ESTÁVEL) atualizam a cada tecla, antes de gravar.
 - **Post novo** — sem histórico do post, compara com a última leitura do mesmo site e país (e avisa que é esse o caso).
 - **Histórico** — visão *por campanha* (última leitura de cada uma) ou *todas as leituras*, com Δ contra a leitura anterior, filtros e exportação CSV.
 - **Atalho** — clicar numa linha do histórico preenche o formulário para lançar a próxima leitura daquela campanha.
 
-Regra de cor: para CPR e CPM, **cair é verde, subir é rosa**; variação de até ±2% conta como estável (`FLAT` em `public/app.js`).
+Regra de cor: **CPR caindo é verde** (custo) e **eCPM subindo é verde** (receita); o contrário é rosa; variação de até ±2% conta como estável (`FLAT` em `public/app.js`).
 
 ## Deploy no Railway
 

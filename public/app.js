@@ -75,12 +75,13 @@ function ago(iso) {
 }
 const when = (iso) => new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-// Para CPR e CPM, cair é bom.
-function delta(cur, prev) {
+// CPR é custo: cair é bom. eCPM é receita: subir é bom (up = true).
+function delta(cur, prev, up) {
   if (cur === null || cur === undefined || prev === null || prev === undefined) return { cls: 'none', text: '—', pct: null };
-  if (prev === 0) return cur === 0 ? { cls: 'flat', text: '■ 0,0%', pct: 0 } : { cls: 'bad', text: '▲ novo custo', pct: Infinity };
+  if (prev === 0) return cur === 0 ? { cls: 'flat', text: '■ 0,0%', pct: 0 } : { cls: up ? 'good' : 'bad', text: '▲ saiu do zero', pct: Infinity };
   const pct = ((cur - prev) / prev) * 100;
-  const cls = pct < -FLAT ? 'good' : pct > FLAT ? 'bad' : 'flat';
+  const gain = up ? pct : -pct; // positivo = melhorou
+  const cls = gain > FLAT ? 'good' : gain < -FLAT ? 'bad' : 'flat';
   const arrow = pct < -0.05 ? '▼' : pct > 0.05 ? '▲' : '■';
   return { cls, pct, text: `${arrow} ${Math.abs(pct).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%` };
 }
@@ -270,7 +271,7 @@ function sparkline(series, field, curVal) {
   const path = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
   const li = pts.length - 1;
   const color = curVal !== null ? 'var(--warn)' : 'var(--cyan)';
-  return `<div class="spark"><div class="lbl"><span>${field.toUpperCase()} · ${series.length} leitura${series.length === 1 ? '' : 's'}${curVal !== null ? ' + agora' : ''}</span><span>mín ${fmt(min)} · máx ${fmt(max)}</span></div>
+  return `<div class="spark"><div class="lbl"><span>${field === 'cpm' ? 'eCPM' : 'CPR'} · ${series.length} leitura${series.length === 1 ? '' : 's'}${curVal !== null ? ' + agora' : ''}</span><span>mín ${fmt(min)} · máx ${fmt(max)}</span></div>
     <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
       <path d="${path}" fill="none" stroke="var(--cyan)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
       <circle cx="${x(li).toFixed(1)}" cy="${y(pts[li]).toFixed(1)}" r="3" fill="${color}"/>
@@ -300,14 +301,14 @@ function renderCompare() {
     box.innerHTML = keyLine + `<div class="verdict flat">PRIMEIRA LEITURA<small>Nada gravado para ${esc(site.name)} em ${esc(k.country)}. Esta leitura vira a base de comparação.</small></div>
       <div class="metrics">
         <div class="metric"><div class="lbl">CPR</div><div class="now">${money(cpr, cur)}</div></div>
-        <div class="metric"><div class="lbl">CPM</div><div class="now">${money(cpm, cur)}</div></div>
+        <div class="metric"><div class="lbl">eCPM</div><div class="now">${money(cpm, cur)}</div></div>
       </div>`;
     return;
   }
 
   const dCpr = delta(cpr, ref.cpr);
-  const dCpm = delta(cpm, ref.cpm);
-  let v = { cls: '', text: 'DIGITE CPR E CPM' };
+  const dCpm = delta(cpm, ref.cpm, true);
+  let v = { cls: '', text: 'DIGITE CPR E eCPM' };
   if (cpr !== null || cpm !== null) {
     const a = cpr !== null ? dCpr.cls : null;
     const b = cpm !== null ? dCpm.cls : null;
@@ -329,7 +330,7 @@ function renderCompare() {
 
   box.innerHTML = keyLine +
     `<div class="verdict ${v.cls}">${v.text}<small>${refNote}</small></div>
-     <div class="metrics">${metric('CPR', cpr, ref.cpr, dCpr)}${metric('CPM', cpm, ref.cpm, dCpm)}</div>` +
+     <div class="metrics">${metric('CPR', cpr, ref.cpr, dCpr)}${metric('eCPM', cpm, ref.cpm, dCpm)}</div>` +
     (ref.note ? `<div class="cmp-key" style="margin-top:12px">obs. anterior: <b>${esc(ref.note)}</b></div>` : '') +
     (data.exact ? sparkline(data.series, 'cpr', cpr) + sparkline(data.series, 'cpm', cpm) : '');
 }
@@ -346,7 +347,7 @@ rf.addEventListener('submit', async (e) => {
   err.textContent = '';
   const k = keyOf();
   if (!k.site_id) { err.textContent = 'Cadastre um site primeiro.'; return; }
-  if (parseNum(rf.cpr.value) === null || parseNum(rf.cpm.value) === null) { err.textContent = 'CPR e CPM precisam ser números (ex.: 0,35).'; return; }
+  if (parseNum(rf.cpr.value) === null || parseNum(rf.cpm.value) === null) { err.textContent = 'CPR e eCPM precisam ser números (ex.: 0,35).'; return; }
   const btn = $('#recBtn');
   btn.disabled = true;
   try {
@@ -355,7 +356,7 @@ rf.addEventListener('submit', async (e) => {
       body: { ...k, cpr: rf.cpr.value, cpm: rf.cpm.value, note: rf.note.value },
     });
     const d = previous ? delta(record.cpr, previous.cpr) : null;
-    toast(d ? `GRAVADO · CPR ${d.text} · CPM ${delta(record.cpm, previous.cpm).text}` : 'GRAVADO · primeira leitura desta campanha');
+    toast(d ? `GRAVADO · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : 'GRAVADO · primeira leitura desta campanha');
     rf.cpr.value = ''; rf.cpm.value = ''; rf.note.value = '';
     await Promise.all([loadSites(), loadRecords(true, record.id)]);
     await fetchLast();
@@ -389,8 +390,8 @@ async function loadRecords(reset, flashId) {
 }
 
 function renderRecords(flashId) {
-  const dcell = (cur, prev) => {
-    const d = delta(cur, prev);
+  const dcell = (cur, prev, up) => {
+    const d = delta(cur, prev, up);
     return `<td class="dl ${d.cls}">${d.text}${prev !== null ? `<small>antes ${fmt(prev)}</small>` : '<small>1ª leitura</small>'}</td>`;
   };
   $('#rows').innerHTML = state.records.length ? state.records.map((r) => `
@@ -400,7 +401,7 @@ function renderRecords(flashId) {
       <td class="pid">${esc(r.post_id)}${state.mode === 'latest' && r.readings > 1 ? `<span class="tag">${r.readings}×</span>` : ''}</td>
       <td>${flag(r.country)} ${esc(r.country)}</td>
       <td class="num">${money(r.cpr, r.currency)}</td>${dcell(r.cpr, r.prev_cpr)}
-      <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm)}
+      <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm, true)}
       <td class="obs" title="${esc(r.note)}">${esc(r.note)}</td>
       <td><button class="icon del" data-act="del" title="Apagar esta leitura">✕</button></td>
     </tr>`).join('')
