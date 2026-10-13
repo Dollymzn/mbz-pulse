@@ -179,7 +179,7 @@ kbd { font: inherit; opacity: .55; margin-left: 8px; border: 1px solid currentCo
 .hist-head h2 { margin: 0; }
 .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .filters input, .filters select { width: auto; margin: 0; padding: 7px 9px; font-size: 12px; }
-#fCountry { width: 70px; }
+#fCountry { width: 110px; }
 #fPost { width: 200px; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }

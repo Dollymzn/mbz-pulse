@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MBZ::PULSE</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="theme-color" content="#04060b">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@600;800&display=swap" rel="stylesheet">
@@ -73,7 +75,7 @@
         <div class="grid2">
           <label>SITE<select name="site_id" required></select></label>
           <label>PAÍS
-            <input name="country" list="countries" maxlength="2" placeholder="BR" required class="upper">
+            <input name="country" list="countries" maxlength="40" placeholder="BR ou nome" required class="upper">
           </label>
         </div>
         <label>POST ID
@@ -107,7 +109,7 @@
       </div>
       <div class="filters">
         <select id="fSite"></select>
-        <input id="fCountry" placeholder="país" maxlength="2" class="upper" list="countries">
+        <input id="fCountry" placeholder="país" maxlength="40" class="upper" list="countries">
         <input id="fPost" placeholder="buscar post id">
         <button class="btn ghost sm" id="fClear">LIMPAR</button>
         <span class="spacer"></span>

@@ -8,15 +8,26 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const FLAT = 2; // variação até ±2% conta como estável
 const PAGE = 50;
 const SYMBOL = { USD: '$', BRL: 'R$', EUR: '€' };
-const COUNTRIES = {
-  BR: 'Brasil', PT: 'Portugal', US: 'Estados Unidos', GB: 'Reino Unido', CA: 'Canadá', AU: 'Austrália',
-  ES: 'Espanha', MX: 'México', AR: 'Argentina', CO: 'Colômbia', CL: 'Chile', PE: 'Peru', EC: 'Equador',
-  VE: 'Venezuela', UY: 'Uruguai', PY: 'Paraguai', BO: 'Bolívia', DO: 'Rep. Dominicana', GT: 'Guatemala',
-  FR: 'França', BE: 'Bélgica', CH: 'Suíça', IT: 'Itália', DE: 'Alemanha', AT: 'Áustria', NL: 'Países Baixos',
-  IE: 'Irlanda', NZ: 'Nova Zelândia', ZA: 'África do Sul', IN: 'Índia', PH: 'Filipinas', NG: 'Nigéria',
-  AO: 'Angola', MZ: 'Moçambique', MA: 'Marrocos', DZ: 'Argélia', TN: 'Tunísia', SN: 'Senegal', CI: 'Costa do Marfim',
-  PL: 'Polônia', RO: 'Romênia', SE: 'Suécia', NO: 'Noruega', DK: 'Dinamarca', JP: 'Japão', ID: 'Indonésia',
-};
+// Todos os códigos ISO 3166-1 alpha-2; os nomes vêm do próprio navegador, em português.
+const ISO = ('AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ '
+  + 'CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR '
+  + 'GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP '
+  + 'KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT '
+  + 'MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW '
+  + 'SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ '
+  + 'UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW').split(' ');
+const regionName = (() => {
+  try { const dn = new Intl.DisplayNames(['pt-BR'], { type: 'region' }); return (c) => dn.of(c) || c; }
+  catch { return (c) => c; }
+})();
+const plain = (v) => String(v).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase();
+const COUNTRIES = ISO.map((code) => ({ code, name: regionName(code) })).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+const BY_NAME = new Map(COUNTRIES.map((c) => [plain(c.name), c.code]));
+// Quem digitar o nome inteiro ("Turquia") tem o campo trocado pelo código ("TR").
+function normCountry(input) {
+  const code = BY_NAME.get(plain(input.value));
+  if (code && plain(input.value).length > 2) input.value = code;
+}
 
 const state = { user: null, sites: [], records: [], total: 0, mode: 'latest', last: null, lastKey: '', seq: 0 };
 
@@ -325,7 +336,7 @@ function renderCompare() {
 
 rf.site_id.addEventListener('change', () => { renderSites(); refreshLast(true); });
 rf.post_id.addEventListener('input', () => refreshLast());
-rf.country.addEventListener('input', () => refreshLast());
+rf.country.addEventListener('input', () => { normCountry(rf.country); refreshLast(); });
 rf.cpr.addEventListener('input', renderCompare);
 rf.cpm.addEventListener('input', renderCompare);
 
@@ -434,7 +445,7 @@ $$('[data-mode]').forEach((b) => b.addEventListener('click', () => {
 let fTimer;
 const refilter = () => { clearTimeout(fTimer); fTimer = setTimeout(() => loadRecords(true), 250); };
 $('#fSite').addEventListener('change', refilter);
-$('#fCountry').addEventListener('input', refilter);
+$('#fCountry').addEventListener('input', () => { normCountry($('#fCountry')); refilter(); });
 $('#fPost').addEventListener('input', refilter);
 $('#fClear').addEventListener('click', () => { $('#fSite').value = ''; $('#fCountry').value = ''; $('#fPost').value = ''; loadRecords(true); });
 $('#more').addEventListener('click', () => loadRecords(false));
@@ -442,7 +453,7 @@ $('#csv').addEventListener('click', () => { window.location.href = '/api/records
 
 /* ---------- boot ---------- */
 
-$('#countries').innerHTML = Object.entries(COUNTRIES).map(([c, n]) => `<option value="${c}">${n}</option>`).join('');
+$('#countries').innerHTML = COUNTRIES.map((c) => `<option value="${c.code}">${esc(c.name)}</option>`).join('');
 
 (async () => {
   try { inviteRequired = (await api('/config')).invite_required; } catch { /* segue */ }
