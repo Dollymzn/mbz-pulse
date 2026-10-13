@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MBZ::PULSE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@600;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="fx-grid"></div>
+<div class="fx-scan"></div>
+
+<!-- ============ LOGIN ============ -->
+<section id="auth" class="auth" hidden>
+  <div class="panel auth-box">
+    <div class="logo big">MBZ<span>::</span>PULSE</div>
+    <p class="tagline">// CPR · CPM · POST · GEO — leitura contra o último registro</p>
+    <div class="tabs">
+      <button class="tab on" data-auth="login">ENTRAR</button>
+      <button class="tab" data-auth="register">CRIAR CONTA</button>
+    </div>
+    <form id="authForm" autocomplete="on">
+      <label class="only-register" hidden>NOME<input name="name" maxlength="60" autocomplete="name"></label>
+      <label>E-MAIL<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
+      <label>SENHA<input name="password" type="password" required minlength="8" maxlength="100" autocomplete="current-password"></label>
+      <label class="only-invite" hidden>CÓDIGO DE CONVITE<input name="invite" maxlength="100" autocomplete="off"></label>
+      <p class="msg err" id="authErr"></p>
+      <button class="btn primary wide" type="submit" id="authBtn">ACESSAR TERMINAL</button>
+    </form>
+  </div>
+</section>
+
+<!-- ============ APP ============ -->
+<div id="app" hidden>
+  <header class="top">
+    <div class="logo">MBZ<span>::</span>PULSE</div>
+    <div class="top-right">
+      <span class="live"><i></i>ONLINE</span>
+      <span id="userName" class="user"></span>
+      <button class="btn ghost sm" id="logout">SAIR</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- SITES -->
+    <aside class="panel sites">
+      <h2><b>01</b> MEUS SITES</h2>
+      <ul id="siteList" class="site-list"></ul>
+      <form id="siteForm" class="site-form">
+        <input type="hidden" name="id">
+        <input name="name" placeholder="nome do site" maxlength="80" required>
+        <input name="url" placeholder="url (opcional)" maxlength="200">
+        <div class="row">
+          <select name="currency" title="Moeda dos valores">
+            <option value="USD">USD $</option>
+            <option value="BRL">BRL R$</option>
+            <option value="EUR">EUR €</option>
+          </select>
+          <button class="btn sm" type="submit" id="siteBtn">+ ADICIONAR</button>
+          <button class="btn ghost sm" type="button" id="siteCancel" hidden>CANCELAR</button>
+        </div>
+        <p class="msg err" id="siteErr"></p>
+      </form>
+    </aside>
+
+    <!-- NOVA LEITURA + COMPARAÇÃO -->
+    <section class="panel entry">
+      <h2><b>02</b> NOVA LEITURA</h2>
+      <form id="recForm" autocomplete="off">
+        <div class="grid2">
+          <label>SITE<select name="site_id" required></select></label>
+          <label>PAÍS
+            <input name="country" list="countries" maxlength="2" placeholder="BR" required class="upper">
+          </label>
+        </div>
+        <label>POST ID
+          <input name="post_id" maxlength="80" placeholder="ex.: 120214567890123" required inputmode="numeric" list="knownPosts">
+        </label>
+        <div class="grid2">
+          <label>CPR <small id="curCpr"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required></label>
+          <label>CPM <small id="curCpm"></small><input name="cpm" inputmode="decimal" placeholder="0,00" required></label>
+        </div>
+        <label>OBSERVAÇÃO <small>opcional</small><input name="note" maxlength="280" placeholder="ex.: troquei criativo, subi orçamento"></label>
+        <p class="msg err" id="recErr"></p>
+        <button class="btn primary wide" type="submit" id="recBtn">GRAVAR LEITURA <kbd>ENTER</kbd></button>
+      </form>
+      <datalist id="knownPosts"></datalist>
+      <datalist id="countries"></datalist>
+    </section>
+
+    <section class="panel compare" id="compare">
+      <h2><b>03</b> COMPARAÇÃO AO VIVO</h2>
+      <div id="cmpBody"></div>
+    </section>
+
+    <!-- HISTÓRICO -->
+    <section class="panel history">
+      <div class="hist-head">
+        <h2><b>04</b> HISTÓRICO</h2>
+        <div class="tabs sm">
+          <button class="tab on" data-mode="latest" title="Uma linha por campanha (site + post + país), com a leitura mais recente">POR CAMPANHA</button>
+          <button class="tab" data-mode="all" title="Todas as leituras gravadas">TODAS AS LEITURAS</button>
+        </div>
+      </div>
+      <div class="filters">
+        <select id="fSite"></select>
+        <input id="fCountry" placeholder="país" maxlength="2" class="upper" list="countries">
+        <input id="fPost" placeholder="buscar post id">
+        <button class="btn ghost sm" id="fClear">LIMPAR</button>
+        <span class="spacer"></span>
+        <span id="histCount" class="dim"></span>
+        <button class="btn ghost sm" id="csv">EXPORTAR CSV</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>QUANDO</th><th>SITE</th><th>POST ID</th><th>PAÍS</th>
+            <th class="r">CPR</th><th class="r">Δ CPR</th><th class="r">CPM</th><th class="r">Δ CPM</th>
+            <th>OBS</th><th></th>
+          </tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="more"><button class="btn ghost sm" id="more" hidden>CARREGAR MAIS</button></div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
