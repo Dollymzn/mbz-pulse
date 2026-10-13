@@ -1,6 +1,6 @@
 # MBZ::PULSE
 
-Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é comparada na hora com o último registro da mesma campanha (site + post id + país). Cada usuário tem a própria conta, os próprios sites e o próprio histórico.
+Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é comparada na hora com o último registro da mesma campanha (site + post id + país + idioma). Cada usuário tem a própria conta, os próprios sites e o próprio histórico.
 
 ## O que faz
 
@@ -10,6 +10,10 @@ Rastreador de **CPR / eCPM por post, país e site**. Cada leitura gravada é com
 - **Sites por usuário** — nome, URL e moeda (USD, BRL, EUR).
 - **Comparação ao vivo** — ao preencher site + país + post id, o último registro aparece; ao digitar CPR/eCPM, a variação e o veredito (MELHOROU / PIOROU / MISTO / ESTÁVEL) atualizam a cada tecla, antes de gravar.
 - **Só ID contra o mesmo ID** — um post sem histórico aparece como primeira leitura; nunca é comparado com outro post do site.
+- **Idioma** — campo opcional por leitura; o mesmo ID em `US · en` e `US · es` vira duas campanhas separadas.
+- **Atualização** — aba que lista os IDs de um site; clicar abre o histórico do dia e os campos para a próxima leitura.
+- **Importação** — planilha (.xlsx/.csv) com leituras novas, com modelo para baixar e prévia validada antes de gravar.
+- **Período** — filtro hoje / ontem / 7 dias / 30 dias / mês / personalizado, aplicado também às exportações.
 - **Histórico** — visão *por campanha* (última leitura de cada uma) ou *todas as leituras*, com Δ contra a leitura anterior, filtros e exportação CSV.
 - **Atalho** — clicar numa linha do histórico preenche o formulário para lançar a próxima leitura daquela campanha.
 

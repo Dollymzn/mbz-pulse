@@ -270,7 +270,9 @@ const keyOf = () => ({
   site_id: rf.site_id.value,
   post_id: rf.post_id.value.trim(),
   country: rf.country.value.trim().toUpperCase(),
+  lang: rf.lang.value.trim().toLowerCase(),
 });
+const geo = (country, lang) => `${flag(country)} ${esc(country)}${lang ? ` <span class="lang">· ${esc(lang)}</span>` : ''}`;
 
 let lastTimer;
 function refreshLast(now) {
@@ -280,14 +282,14 @@ function refreshLast(now) {
 
 async function fetchLast() {
   const k = keyOf();
-  const key = `${k.site_id}|${k.post_id}|${k.country}`;
+  const key = `${k.site_id}|${k.post_id}|${k.country}|${k.lang}`;
   if (!k.site_id || !/^[A-Z]{2}$/.test(k.country)) {
     state.last = null; state.lastKey = ''; state.seq++;
     return renderCompare();
   }
   const seq = ++state.seq;
   try {
-    const data = await api(`/records/last?site_id=${k.site_id}&post_id=${encodeURIComponent(k.post_id)}&country=${k.country}${state.editing ? '&exclude_id=' + state.editing : ''}`);
+    const data = await api(`/records/last?site_id=${k.site_id}&post_id=${encodeURIComponent(k.post_id)}&country=${k.country}&lang=${encodeURIComponent(k.lang)}${state.editing ? '&exclude_id=' + state.editing : ''}`);
     if (seq !== state.seq) return; // chegou resposta antiga
     state.last = data; state.lastKey = key;
   } catch { if (seq === state.seq) state.last = null; }
@@ -329,10 +331,10 @@ function renderCompare() {
   const cpr = parseNum(rf.cpr.value);
   const cpm = parseNum(rf.cpm.value);
   const cur = site.currency;
-  const keyLine = `<div class="cmp-key"><b>${esc(site.name)}</b> · ${flag(k.country)} <b>${esc(k.country)}</b> · post <b>${esc(k.post_id)}</b></div>`;
+  const keyLine = `<div class="cmp-key"><b>${esc(site.name)}</b> · ${flag(k.country)} <b>${esc(k.country)}</b>${k.lang ? ` · idioma <b>${esc(k.lang)}</b>` : ''} · post <b>${esc(k.post_id)}</b></div>`;
 
   if (!ref) {
-    box.innerHTML = keyLine + `<div class="verdict flat">PRIMEIRA LEITURA<small>Este ID ainda não tem leitura em ${esc(k.country)} neste site. Esta leitura vira a base de comparação dele.</small></div>
+    box.innerHTML = keyLine + `<div class="verdict flat">PRIMEIRA LEITURA<small>Este ID ainda não tem leitura em ${esc(k.country)}${k.lang ? ' / ' + esc(k.lang) : ''} neste site. Esta leitura vira a base de comparação dele.</small></div>
       <div class="metrics">
         <div class="metric"><div class="lbl">CPR</div><div class="now">${money(cpr, cur)}</div></div>
         <div class="metric"><div class="lbl">eCPM</div><div class="now">${money(cpm, cur)}</div></div>
@@ -370,6 +372,7 @@ function renderCompare() {
 rf.site_id.addEventListener('change', () => { renderSites(); refreshLast(true); });
 rf.post_id.addEventListener('input', () => refreshLast());
 rf.country.addEventListener('input', () => { normCountry(rf.country); refreshLast(); });
+rf.lang.addEventListener('input', () => refreshLast());
 rf.cpr.addEventListener('input', renderCompare);
 function setAction(a) {
   rf.action.value = a || '';
@@ -430,8 +433,32 @@ $('#recCancel').addEventListener('click', cancelEdit);
 
 /* ---------- histórico ---------- */
 
+// Limites do período escolhido, no fuso do navegador, em ISO (o servidor compara em UTC).
+function periodRange() {
+  const p = $('#fPeriod').value;
+  const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const today = day(new Date());
+  const plus = (d, n) => new Date(d.getTime() + n * 86400e3);
+  if (p === 'today') return [today, plus(today, 1)];
+  if (p === 'yesterday') return [plus(today, -1), today];
+  if (p === '7d') return [plus(today, -6), plus(today, 1)];
+  if (p === '30d') return [plus(today, -29), plus(today, 1)];
+  if (p === 'month') return [new Date(today.getFullYear(), today.getMonth(), 1), plus(today, 1)];
+  if (p === 'custom') {
+    const f = $('#fFrom').value ? new Date($('#fFrom').value + 'T00:00:00') : null;
+    const t = $('#fTo').value ? plus(new Date($('#fTo').value + 'T00:00:00'), 1) : null;
+    return [f, t];
+  }
+  return [null, null];
+}
+
 function filterQuery() {
   const q = new URLSearchParams();
+  const [from, to] = periodRange();
+  if (from) q.set('from', from.toISOString());
+  if (to) q.set('to', to.toISOString());
+  const lg = $('#fLang').value.trim().toLowerCase();
+  if (lg) q.set('lang', lg);
   if ($('#fSite').value) q.set('site_id', $('#fSite').value);
   const c = $('#fCountry').value.trim().toUpperCase();
   if (/^[A-Z]{2}$/.test(c)) q.set('country', c);
@@ -466,7 +493,7 @@ function renderRecords(flashId) {
       <td>${esc(r.site_name)}</td>
       ${isMaster() ? `<td class="dim" title="gravado por ${esc(r.added_by)}">${esc(r.owner_name)}</td>` : ''}
       <td class="pid">${esc(r.post_id)}${state.mode === 'latest' && r.readings > 1 ? `<span class="tag">${r.readings}×</span>` : ''}</td>
-      <td>${flag(r.country)} ${esc(r.country)}</td>
+      <td>${geo(r.country, r.lang)}</td>
       <td class="num">${money(r.cpr, r.currency)}</td>${dcell(r.cpr, r.prev_cpr)}
       <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm, true)}
       <td>${r.action ? `<span class="atag ${esc(r.action)}">${ACTION_LABEL[r.action]}</span>` : ''}</td>
@@ -506,6 +533,8 @@ $('#rows').addEventListener('click', async (e) => {
   rf.site_id.value = r.site_id;
   rf.post_id.value = r.post_id;
   rf.country.value = r.country;
+  rf.lang.value = r.lang || '';
+  showTab('new');
   renderSites();
   refreshLast(true);
   rf.cpr.focus();
@@ -524,15 +553,201 @@ $('#fSite').addEventListener('change', refilter);
 $('#fCountry').addEventListener('input', () => { normCountry($('#fCountry')); refilter(); });
 $('#fPost').addEventListener('input', refilter);
 $('#fAction').addEventListener('change', refilter);
+$('#fLang').addEventListener('input', refilter);
+$('#fPeriod').addEventListener('change', () => {
+  const custom = $('#fPeriod').value === 'custom';
+  $$('.custom-date').forEach((el) => { el.hidden = !custom; });
+  if (!custom) refilter();
+});
+$('#fFrom').addEventListener('change', refilter);
+$('#fTo').addEventListener('change', refilter);
 $('#fCompany').addEventListener('change', refilter);
 $('#fOwner').addEventListener('change', refilter);
-$('#fClear').addEventListener('click', () => { ['#fSite', '#fCountry', '#fPost', '#fAction', '#fCompany', '#fOwner'].forEach((id) => { $(id).value = ''; }); loadRecords(true); });
+$('#fClear').addEventListener('click', () => {
+  ['#fSite', '#fCountry', '#fLang', '#fPost', '#fAction', '#fCompany', '#fOwner', '#fPeriod', '#fFrom', '#fTo'].forEach((id) => { $(id).value = ''; });
+  $$('.custom-date').forEach((el) => { el.hidden = true; });
+  loadRecords(true);
+});
 $('#more').addEventListener('click', () => loadRecords(false));
 $('#xlsx').addEventListener('click', () => {
   const q = filterQuery(); q.delete('latest'); q.set('tzo', new Date().getTimezoneOffset());
   window.location.href = '/api/records/export.xlsx?' + q;
 });
 $('#csv').addEventListener('click', () => { window.location.href = '/api/records/export.csv?' + filterQuery(); });
+
+/* ---------- abas do painel 02 ---------- */
+
+function showTab(tab) {
+  $$('#entryTabs .tab').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  $$('[data-tab-pane]').forEach((el) => { el.hidden = el.dataset.tabPane !== tab; });
+  if (tab !== 'new' && state.editing) cancelEdit();
+  if (tab === 'update') loadCampaigns();
+}
+$$('#entryTabs .tab').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+/* ---------- ATUALIZAÇÃO: IDs cadastrados por site ---------- */
+
+const upd = { site: null, campaigns: [], current: null };
+
+function fillUpdSites() {
+  const sel = $('#updSite');
+  const keep = sel.value;
+  sel.innerHTML = $('#recForm [name=site_id]').innerHTML;
+  if (siteById(keep)) sel.value = keep;
+}
+
+async function loadCampaigns() {
+  fillUpdSites();
+  const id = $('#updSite').value;
+  if (!id) { $('#updList').innerHTML = '<li class="empty">Cadastre um site no painel 01.</li>'; return; }
+  try {
+    const data = await api(`/sites/${id}/campaigns`);
+    upd.site = data.site; upd.campaigns = data.campaigns;
+    renderCampaigns();
+  } catch (err) { toast(err.message, true); }
+}
+
+function renderCampaigns() {
+  const q = plain($('#updSearch').value);
+  const list = upd.campaigns.filter((c) => !q || plain(`${c.post_id} ${c.country} ${c.lang}`).includes(q));
+  const cur = upd.site ? upd.site.currency : 'USD';
+  $('#updList').innerHTML = list.length ? list.map((c, i) => {
+    const d1 = delta(c.cpr, c.prev_cpr), d2 = delta(c.cpm, c.prev_cpm, true);
+    return `<li data-i="${upd.campaigns.indexOf(c)}">
+      <div class="k">${esc(c.post_id)}<span>${geo(c.country, c.lang)}</span></div>
+      <div class="v">${money(c.cpr, cur)} <span class="dim">·</span> ${money(c.cpm, cur)}</div>
+      <div class="m">${ago(c.created_at)} · ${c.readings} leit. · CPR <span class="${d1.cls}">${d1.text}</span> · eCPM <span class="${d2.cls}">${d2.text}</span>${c.action ? ` · ${ACTION_LABEL[c.action]}` : ''}</div>
+    </li>`;
+  }).join('') : `<li class="empty">${upd.campaigns.length ? 'Nenhum ID bate com a busca.' : 'Este site ainda não tem IDs. Grave a primeira leitura na aba NOVA.'}</li>`;
+}
+$('#updSite').addEventListener('change', loadCampaigns);
+$('#updSearch').addEventListener('input', renderCampaigns);
+$('#updList').addEventListener('click', (e) => {
+  const li = e.target.closest('li[data-i]');
+  if (li) openModal(upd.campaigns[Number(li.dataset.i)]);
+});
+
+/* ---------- modal: histórico de hoje + atualizar ---------- */
+
+const mf = $('#mForm');
+function mSetAction(a) {
+  mf.action.value = a || '';
+  $$('#mActions .act').forEach((b) => b.classList.toggle('on', b.dataset.action === a));
+}
+$('#mActions').addEventListener('click', (e) => {
+  const b = e.target.closest('.act');
+  if (b) mSetAction(mf.action.value === b.dataset.action ? '' : b.dataset.action);
+});
+
+async function openModal(c) {
+  upd.current = { ...c, site_id: upd.site.id, currency: upd.site.currency, site_name: upd.site.name };
+  $('#mTitle').innerHTML = `${esc(c.post_id)} <span class="dim">·</span> ${geo(c.country, c.lang)} <span class="dim">· ${esc(upd.site.name)}</span>`;
+  $('#mCur').textContent = `em ${upd.site.currency}`;
+  mf.reset(); mSetAction(''); $('#mErr').textContent = '';
+  $('#modal').hidden = false;
+  await loadModalHistory();
+  mf.cpr.focus();
+}
+
+async function loadModalHistory() {
+  const c = upd.current;
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const q = new URLSearchParams({ site_id: c.site_id, post_id: c.post_id, exact: '1', country: c.country, lang: c.lang || '', limit: 50 });
+  const [today, all] = await Promise.all([
+    api(`/records?${q}&from=${start.toISOString()}`),
+    api(`/records/last?site_id=${c.site_id}&post_id=${encodeURIComponent(c.post_id)}&country=${c.country}&lang=${encodeURIComponent(c.lang || '')}`),
+  ]);
+  upd.ref = all.exact; // última leitura (hoje ou antes) — base da comparação
+  const rows = today.records;
+  const cur = c.currency;
+  const dcell = (v, p, up) => { const d = delta(v, p, up); return `<td class="dl ${d.cls}">${d.text}</td>`; };
+  $('#mToday').innerHTML = `
+    <div class="m-today"><div class="cap">HOJE · ${rows.length} leitura${rows.length === 1 ? '' : 's'}</div>
+      ${rows.length ? `<table><thead><tr><th>HORA</th><th class="r">CPR</th><th class="r">Δ</th><th class="r">eCPM</th><th class="r">Δ</th><th>AÇÃO</th><th>POR</th><th>OBS</th></tr></thead><tbody>
+        ${rows.map((r) => `<tr><td>${new Date(r.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</td>
+          <td class="num">${money(r.cpr, cur)}</td>${dcell(r.cpr, r.prev_cpr)}<td class="num">${money(r.cpm, cur)}</td>${dcell(r.cpm, r.prev_cpm, true)}
+          <td>${r.action ? `<span class="atag ${esc(r.action)}">${ACTION_LABEL[r.action]}</span>` : ''}</td><td class="dim">${esc(r.added_by)}</td><td class="obs" title="${esc(r.note)}">${esc(r.note)}</td></tr>`).join('')}
+      </tbody></table>` : '<div class="empty">Nenhuma leitura hoje ainda.</div>'}
+    </div>
+    ${upd.ref ? `<p class="m-ref">base de comparação: <b>${money(upd.ref.cpr, cur)}</b> · <b>${money(upd.ref.cpm, cur)}</b> · ${ago(upd.ref.created_at)} (${when(upd.ref.created_at)})${upd.ref.action ? ` · ${ACTION_LABEL[upd.ref.action]}` : ''}</p>` : ''}`;
+  renderModalCompare();
+}
+
+function renderModalCompare() {
+  const ref = upd.ref;
+  const box = $('#mCompare');
+  if (!ref) { box.innerHTML = ''; return; }
+  const cpr = parseNum(mf.cpr.value), cpm = parseNum(mf.cpm.value);
+  const d1 = delta(cpr, ref.cpr), d2 = delta(cpm, ref.cpm, true);
+  box.innerHTML = `<div><div class="lbl">Δ CPR</div><div class="delta ${d1.cls}">${d1.text}</div></div><div><div class="lbl">Δ eCPM</div><div class="delta ${d2.cls}">${d2.text}</div></div>`;
+}
+mf.cpr.addEventListener('input', renderModalCompare);
+mf.cpm.addEventListener('input', renderModalCompare);
+
+function closeModal() { $('#modal').hidden = true; upd.current = null; }
+$('#mClose').addEventListener('click', closeModal);
+$('#modal').addEventListener('click', (e) => { if (e.target === $('#modal')) closeModal(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#modal').hidden) closeModal(); });
+
+mf.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const c = upd.current;
+  if (!c) return;
+  if (parseNum(mf.cpr.value) === null || parseNum(mf.cpm.value) === null) { $('#mErr').textContent = 'CPR e eCPM precisam ser números.'; return; }
+  $('#mBtn').disabled = true;
+  try {
+    const { record, previous } = await api('/records', { method: 'POST', body: {
+      site_id: c.site_id, post_id: c.post_id, country: c.country, lang: c.lang || '',
+      cpr: mf.cpr.value, cpm: mf.cpm.value, note: mf.note.value, action: mf.action.value } });
+    const d = previous ? delta(record.cpr, previous.cpr) : null;
+    toast(d ? `GRAVADO · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : 'GRAVADO · primeira leitura desta campanha');
+    mf.cpr.value = ''; mf.cpm.value = ''; mf.note.value = ''; mSetAction('');
+    await Promise.all([loadModalHistory(), loadCampaigns(), loadSites(), loadRecords(true, record.id)]);
+    mf.cpr.focus();
+  } catch (err) { $('#mErr').textContent = err.message; }
+  finally { $('#mBtn').disabled = false; }
+});
+
+/* ---------- IMPORTAR planilha ---------- */
+
+const imp = { rows: [] };
+$('#impTemplate').addEventListener('click', () => { window.location.href = '/api/import/template.xlsx'; });
+$('#impFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('#impName').textContent = file.name;
+  $('#impErr').textContent = '';
+  $('#impPreview').hidden = true;
+  try {
+    const res = await fetch(`/api/import/parse?tzo=${new Date().getTimezoneOffset()}`, { method: 'POST', body: file, credentials: 'same-origin', headers: { 'Content-Type': 'application/octet-stream' } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao ler o arquivo.');
+    imp.rows = data.rows;
+    $('#impSummary').innerHTML = `<b>${data.ok}</b> linha${data.ok === 1 ? '' : 's'} pronta${data.ok === 1 ? '' : 's'} para importar` +
+      (data.errors ? ` · <span class="bad">${data.errors} com erro (serão ignoradas)</span>` : '') + (data.truncated ? ' · só as 5000 primeiras foram lidas' : '');
+    $('#impRows').innerHTML = data.rows.map((r) => `<tr class="${r.error ? 'has-err' : ''}">
+      <td class="dim">${r.n}</td><td>${esc(r.site)}</td><td class="pid">${esc(r.post_id)}</td><td>${esc(r.country)}</td><td>${esc(r.lang)}</td>
+      <td class="num">${r.error ? esc(r.cpr) : money(r.cpr, r.currency)}</td><td class="num">${r.error ? esc(r.cpm) : money(r.cpm, r.currency)}</td>
+      <td>${r.action ? ACTION_LABEL[r.action] || esc(r.action) : ''}</td><td class="dim">${r.at ? when(r.at) : 'agora'}</td>
+      <td class="${r.error ? 'bad' : 'good'}">${r.error ? 'ERRO' : 'OK'}</td></tr>${r.error ? `<tr class="err-detail"><td></td><td colspan="9">↳ ${esc(r.error)}</td></tr>` : ''}`).join('');
+    $('#impCommit').textContent = `IMPORTAR ${data.ok} LEITURA${data.ok === 1 ? '' : 'S'}`;
+    $('#impCommit').disabled = !data.ok;
+    $('#impPreview').hidden = false;
+  } catch (err) { $('#impErr').textContent = err.message; }
+  e.target.value = '';
+});
+$('#impCommit').addEventListener('click', async () => {
+  const rows = imp.rows.filter((r) => !r.error);
+  if (!rows.length) return;
+  if (!confirm(`Importar ${rows.length} leitura${rows.length === 1 ? '' : 's'}? Elas entram no histórico como leituras novas.`)) return;
+  $('#impCommit').disabled = true;
+  try {
+    const { imported } = await api('/import/commit', { method: 'POST', body: { rows } });
+    toast(`${imported} leitura${imported === 1 ? '' : 's'} importada${imported === 1 ? '' : 's'}.`);
+    imp.rows = []; $('#impPreview').hidden = true; $('#impName').textContent = '';
+    await Promise.all([loadSites(), loadRecords(true)]);
+  } catch (err) { $('#impErr').textContent = err.message; $('#impCommit').disabled = false; }
+});
 
 /* ---------- boot ---------- */
 

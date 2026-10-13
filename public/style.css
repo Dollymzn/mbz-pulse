@@ -250,3 +250,45 @@ td .icon + .icon { margin-left: 2px; }
 .atag.escalei { color: var(--cyan); }
 .atag.reduzi { color: var(--warn); }
 .atag.mantive { color: var(--dim); }
+
+/* ---- abas do painel 02 ---- */
+.entry-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.entry-head h2 { margin: 0; }
+.lower { text-transform: lowercase; }
+.hint { color: var(--dim); font-size: 11px; margin: 0 0 12px; line-height: 1.5; }
+.hint b { color: var(--text); font-weight: 500; }
+.file-btn { display: inline-block; cursor: pointer; }
+.table-wrap.small { max-height: 260px; overflow: auto; }
+.table-wrap.small td, .table-wrap.small th { padding: 6px 8px; font-size: 11px; }
+tr.err-detail td { color: var(--bad); white-space: normal; border-top: 0; padding-top: 0; font-size: 10px; }
+
+/* ---- lista de IDs (atualização) ---- */
+.camp-list { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow: auto; border: 1px solid var(--line); }
+.camp-list li { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 9px 10px; cursor: pointer; border-bottom: 1px solid rgba(26, 37, 54, .6); }
+.camp-list li:hover { background: rgba(25, 227, 255, .06); }
+.camp-list .k { color: var(--cyan); font-weight: 500; }
+.camp-list .k span { color: var(--text); margin-left: 8px; }
+.camp-list .v { text-align: right; color: #fff; font-weight: 500; }
+.camp-list .m { color: var(--dim); font-size: 10px; grid-column: 1 / -1; }
+.camp-list .m .good, .camp-list .m .bad, .camp-list .m .flat { font-weight: 700; }
+.camp-list .empty { padding: 14px; color: var(--dim); cursor: default; display: block; }
+
+/* ---- modal ---- */
+.modal { position: fixed; inset: 0; z-index: 70; background: rgba(2, 4, 8, .78); backdrop-filter: blur(3px); display: grid; place-items: start center; padding: 40px 16px; overflow: auto; }
+.modal-box { width: 100%; max-width: 620px; position: relative; }
+.modal-box .close { position: absolute; right: 12px; top: 10px; font-size: 14px; }
+.m-today { border: 1px solid var(--line); margin-bottom: 14px; }
+.m-today table { font-size: 11px; }
+.m-today td, .m-today th { padding: 6px 8px; }
+.m-today .cap { padding: 7px 10px; font-size: 10px; letter-spacing: .14em; color: var(--dim); background: #060a11; border-bottom: 1px solid var(--line); }
+.m-ref { color: var(--dim); font-size: 11px; margin: -6px 0 12px; }
+.m-ref b { color: var(--text); font-weight: 500; }
+.m-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+.m-compare .delta { font: 700 13px var(--mono); }
+.m-compare .lbl { font-size: 10px; color: var(--dim); letter-spacing: .14em; }
+
+/* ---- filtros de data ---- */
+#fPeriod { width: auto; }
+.filters input[type=date] { width: 140px; color-scheme: dark; }
+.lang { color: var(--dim); font-size: 11px; }
+tr.has-err td { opacity: .75; }

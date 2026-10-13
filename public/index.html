@@ -80,12 +80,22 @@
 
     <!-- NOVA LEITURA + COMPARAÇÃO -->
     <section class="panel entry">
-      <h2><b>02</b> NOVA LEITURA</h2>
-      <form id="recForm" autocomplete="off">
+      <div class="entry-head">
+        <h2><b>02</b> NOVA LEITURA</h2>
+        <div class="tabs sm" id="entryTabs">
+          <button class="tab on" data-tab="new">NOVA</button>
+          <button class="tab" data-tab="update">ATUALIZAÇÃO</button>
+          <button class="tab" data-tab="import">IMPORTAR</button>
+        </div>
+      </div>
+      <form id="recForm" autocomplete="off" data-tab-pane="new">
+        <label>SITE<select name="site_id" required></select></label>
         <div class="grid2">
-          <label>SITE<select name="site_id" required></select></label>
           <label>PAÍS
             <input name="country" list="countries" maxlength="40" placeholder="BR ou nome" required class="upper">
+          </label>
+          <label>IDIOMA <small>opcional</small>
+            <input name="lang" list="langs" maxlength="8" placeholder="en, es, pt…" class="lower">
           </label>
         </div>
         <label>POST ID
@@ -110,8 +120,36 @@
         <button class="btn primary wide" type="submit" id="recBtn">GRAVAR LEITURA <kbd>ENTER</kbd></button>
         <button class="btn ghost wide" type="button" id="recCancel" hidden>CANCELAR CORREÇÃO</button>
       </form>
+      <!-- ATUALIZAÇÃO: escolhe o site, lista os IDs cadastrados -->
+      <div data-tab-pane="update" hidden>
+        <label>SITE<select id="updSite"></select></label>
+        <input id="updSearch" placeholder="filtrar por post id, país ou idioma" style="margin-bottom:10px">
+        <ul id="updList" class="camp-list"></ul>
+      </div>
+
+      <!-- IMPORTAR: planilha com leituras novas -->
+      <div data-tab-pane="import" hidden>
+        <p class="hint">Cada linha da planilha vira <b>uma leitura nova</b> (o histórico é preservado). Colunas: SITE, POST ID, PAÍS, IDIOMA, CPR, eCPM, AÇÃO, OBS e DATA (opcional).</p>
+        <div class="row" style="margin-bottom:10px">
+          <button class="btn ghost sm" type="button" id="impTemplate">BAIXAR MODELO</button>
+          <label class="btn sm file-btn">ESCOLHER ARQUIVO<input type="file" id="impFile" accept=".xlsx,.csv" hidden></label>
+          <span id="impName" class="dim"></span>
+        </div>
+        <p class="msg err" id="impErr"></p>
+        <div id="impPreview" hidden>
+          <p id="impSummary" class="hint"></p>
+          <div class="table-wrap small"><table><thead><tr><th>#</th><th>SITE</th><th>POST ID</th><th>PAÍS</th><th>IDIOMA</th><th class="r">CPR</th><th class="r">eCPM</th><th>AÇÃO</th><th>DATA</th><th>STATUS</th></tr></thead><tbody id="impRows"></tbody></table></div>
+          <button class="btn primary wide" type="button" id="impCommit" style="margin-top:10px">IMPORTAR</button>
+        </div>
+      </div>
       <datalist id="knownPosts"></datalist>
       <datalist id="countries"></datalist>
+      <datalist id="langs">
+        <option value="pt">Português</option><option value="pt-br">Português (BR)</option><option value="en">Inglês</option>
+        <option value="es">Espanhol</option><option value="fr">Francês</option><option value="it">Italiano</option>
+        <option value="de">Alemão</option><option value="hi">Hindi</option><option value="ar">Árabe</option><option value="tr">Turco</option>
+        <option value="nl">Holandês</option><option value="pl">Polonês</option><option value="ro">Romeno</option><option value="id">Indonésio</option><option value="ja">Japonês</option>
+      </datalist>
     </section>
 
     <section class="panel compare" id="compare">
@@ -132,7 +170,19 @@
         <select id="fCompany" class="master-only" hidden></select>
         <select id="fOwner" class="master-only" hidden></select>
         <select id="fSite"></select>
+        <select id="fPeriod" title="Período">
+          <option value="">todo o período</option>
+          <option value="today">hoje</option>
+          <option value="yesterday">ontem</option>
+          <option value="7d">últimos 7 dias</option>
+          <option value="30d">últimos 30 dias</option>
+          <option value="month">este mês</option>
+          <option value="custom">personalizado…</option>
+        </select>
+        <input type="date" id="fFrom" class="custom-date" hidden title="de">
+        <input type="date" id="fTo" class="custom-date" hidden title="até">
         <input id="fCountry" placeholder="país" maxlength="40" class="upper" list="countries">
+        <input id="fLang" placeholder="idioma" maxlength="8" class="lower" list="langs">
         <input id="fPost" placeholder="buscar post id">
         <select id="fAction">
           <option value="">qualquer ação</option>
@@ -149,7 +199,7 @@
       <div class="table-wrap">
         <table>
           <thead><tr>
-            <th>QUANDO</th><th>SITE</th><th class="master-only" hidden>GESTOR</th><th>POST ID</th><th>PAÍS</th>
+            <th>QUANDO</th><th>SITE</th><th class="master-only" hidden>GESTOR</th><th>POST ID</th><th>PAÍS · IDIOMA</th>
             <th class="r">CPR</th><th class="r">Δ CPR</th><th class="r">eCPM</th><th class="r">Δ eCPM</th>
             <th>AÇÃO</th><th>OBS</th><th></th>
           </tr></thead>
@@ -159,6 +209,34 @@
       <div class="more"><button class="btn ghost sm" id="more" hidden>CARREGAR MAIS</button></div>
     </section>
   </main>
+</div>
+
+<!-- modal de atualização de um ID -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-box panel">
+    <button class="icon close" id="mClose" title="Fechar">✕</button>
+    <h2><b>ID</b> <span id="mTitle"></span></h2>
+    <div id="mToday"></div>
+    <form id="mForm" autocomplete="off">
+      <div class="grid2">
+        <label>CPR <small id="mCur"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required></label>
+        <label>eCPM<input name="cpm" inputmode="decimal" placeholder="0,00" required></label>
+      </div>
+      <div id="mCompare" class="m-compare"></div>
+      <div class="field">
+        <span class="lbl">O QUE VOCÊ FEZ <small>opcional</small></span>
+        <div class="actions" id="mActions">
+          <button type="button" class="act" data-action="escalei">▲ ESCALEI</button>
+          <button type="button" class="act" data-action="reduzi">▼ REDUZI</button>
+          <button type="button" class="act" data-action="mantive">■ MANTIVE</button>
+        </div>
+        <input type="hidden" name="action" value="">
+      </div>
+      <label>OBSERVAÇÃO <small>opcional</small><input name="note" maxlength="280"></label>
+      <p class="msg err" id="mErr"></p>
+      <button class="btn primary wide" type="submit" id="mBtn">GRAVAR ATUALIZAÇÃO <kbd>ENTER</kbd></button>
+    </form>
+  </div>
 </div>
 
 <div id="toast" class="toast" hidden></div>

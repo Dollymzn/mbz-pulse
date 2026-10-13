@@ -25,7 +25,7 @@ if (!JWT_SECRET) {
 const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
-app.use(express.json({ limit: '50kb' }));
+app.use(express.json({ limit: '6mb' })); // a importação manda a prévia inteira de volta
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -75,6 +75,21 @@ function companyOf(v, { required = true } = {}) {
   if (!s && !required) return '';
   if (!COMPANIES.includes(s)) throw bad('Empresa inválida. Escolha ' + COMPANIES.join(' ou ') + '.');
   return s;
+}
+
+// Idioma da campanha (ex.: en, es, pt-br). Opcional: distingue o mesmo ID rodando em dois idiomas no mesmo país.
+function langOf(v) {
+  const s = String(v ?? '').trim().toLowerCase().replace('_', '-');
+  if (!s) return '';
+  if (!/^[a-z]{2,3}(-[a-z0-9]{2,4})?$/.test(s)) throw bad('Idioma inválido (use en, es, pt, pt-br...).');
+  return s;
+}
+
+function dateOf(v, label) {
+  if (v === undefined || v === null || v === '') return null;
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (Number.isNaN(d.getTime())) throw bad(`${label} inválida.`);
+  return d;
 }
 
 function actionOf(v) {
@@ -222,7 +237,7 @@ app.get('/api/sites', auth, wrap(async (req, res) => {
     SELECT s.id, s.name, s.url, s.currency, s.created_at, s.user_id AS owner_id,
            o.name AS owner_name, o.company,
            COUNT(r.id)::int AS records,
-           COUNT(DISTINCT (r.post_id, r.country))::int AS campaigns,
+           COUNT(DISTINCT (r.post_id, r.country, r.lang))::int AS campaigns,
            MAX(r.created_at) AS last_at
     FROM sites s JOIN users o ON o.id = s.user_id LEFT JOIN records r ON r.site_id = s.id
     WHERE ($1::int IS NULL OR s.user_id = $1)
@@ -277,22 +292,22 @@ app.delete('/api/sites/:id', auth, wrap(async (req, res) => {
 // $1 = dono dos sites (null para o master, que vê tudo). gestor = dono do site; added_by = quem gravou.
 const BASE = `
   WITH base AS (
-    SELECT r.id, r.site_id, r.post_id, r.country, r.cpr, r.cpm, r.note, r.action, r.created_at,
+    SELECT r.id, r.site_id, r.post_id, r.country, r.lang, r.cpr, r.cpm, r.note, r.action, r.created_at,
            s.name AS site_name, s.currency, s.user_id AS owner_id,
            o.name AS owner_name, o.company,
            u.name AS added_by, r.user_id AS added_by_id,
            LAG(r.cpr) OVER w AS prev_cpr,
            LAG(r.cpm) OVER w AS prev_cpm,
            LAG(r.created_at) OVER w AS prev_at,
-           COUNT(*) OVER (PARTITION BY r.site_id, r.post_id, r.country)::int AS readings,
-           ROW_NUMBER() OVER (PARTITION BY r.site_id, r.post_id, r.country
+           COUNT(*) OVER (PARTITION BY r.site_id, r.post_id, r.country, r.lang)::int AS readings,
+           ROW_NUMBER() OVER (PARTITION BY r.site_id, r.post_id, r.country, r.lang
                               ORDER BY r.created_at DESC, r.id DESC)::int AS rn
     FROM records r
       JOIN sites s ON s.id = r.site_id
       JOIN users o ON o.id = s.user_id
       JOIN users u ON u.id = r.user_id
     WHERE ($1::int IS NULL OR s.user_id = $1)
-    WINDOW w AS (PARTITION BY r.site_id, r.post_id, r.country ORDER BY r.created_at, r.id)
+    WINDOW w AS (PARTITION BY r.site_id, r.post_id, r.country, r.lang ORDER BY r.created_at, r.id)
   )`;
 
 function recordFilters(q, params) {
@@ -303,6 +318,9 @@ function recordFilters(q, params) {
     params.push(String(q.post_id).trim().slice(0, 80));
     where.push(q.exact === '1' ? `post_id = $${params.length}` : `post_id ILIKE '%' || $${params.length} || '%'`);
   }
+  if (q.lang !== undefined && q.lang !== '') { params.push(langOf(q.lang)); where.push(`lang = $${params.length}`); }
+  if (q.from) { params.push(dateOf(q.from, 'Data inicial')); where.push(`created_at >= $${params.length}`); }
+  if (q.to) { params.push(dateOf(q.to, 'Data final')); where.push(`created_at < $${params.length}`); }
   if (q.company) { params.push(companyOf(q.company)); where.push(`company = $${params.length}`); }
   if (q.owner_id) { params.push(intId(q.owner_id, 'Gestor')); where.push(`owner_id = $${params.length}`); }
   if (q.action) { params.push(actionOf(q.action)); where.push(`action = $${params.length}`); }
@@ -330,15 +348,16 @@ app.get('/api/records/last', auth, wrap(async (req, res) => {
   const site = await ownSite(req, intId(req.query.site_id, 'Site'));
   const postId = String(req.query.post_id || '').trim();
   const c = req.query.country ? country(req.query.country) : null;
+  const lang = langOf(req.query.lang);
   // Ao corrigir uma leitura, compara só com o que veio antes dela.
   const ex = req.query.exclude_id ? intId(req.query.exclude_id) : null;
   const exSql = ex ? ` AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=${ex})` : '';
   let exact = null, series = [];
   if (postId && c) {
     const r = await pool.query(
-      `SELECT id, post_id, country, cpr, cpm, note, action, created_at FROM records
-       WHERE site_id=$1 AND post_id=$2 AND country=$3${exSql}
-       ORDER BY created_at DESC, id DESC LIMIT 30`, [site.id, postId, c]);
+      `SELECT id, post_id, country, lang, cpr, cpm, note, action, created_at FROM records
+       WHERE site_id=$1 AND post_id=$2 AND country=$3 AND lang=$4${exSql}
+       ORDER BY created_at DESC, id DESC LIMIT 30`, [site.id, postId, c, lang]);
     series = r.rows.map(({ cpr, cpm, created_at }) => ({ cpr, cpm, created_at })).reverse();
     exact = r.rows[0] || null;
   }
@@ -349,24 +368,25 @@ function recordBody(body) {
   return {
     post_id: str(body.post_id, 80, 'Post ID'),
     country: country(body.country),
+    lang: langOf(body.lang),
     cpr: money(body.cpr, 'CPR'),
     cpm: money(body.cpm, 'eCPM'),
     note: str(body.note, 280, 'Observação', { required: false }),
     action: actionOf(body.action),
   };
 }
-const RET = 'id, site_id, post_id, country, cpr, cpm, note, action, created_at';
+const RET = 'id, site_id, post_id, country, lang, cpr, cpm, note, action, created_at';
 
 app.post('/api/records', auth, wrap(async (req, res) => {
   const site = await ownSite(req, intId(req.body.site_id, 'Site'));
   const rec = recordBody(req.body);
   const prev = await pool.query(
-    `SELECT cpr, cpm, created_at FROM records WHERE site_id=$1 AND post_id=$2 AND country=$3
-     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rec.post_id, rec.country]);
+    `SELECT cpr, cpm, created_at FROM records WHERE site_id=$1 AND post_id=$2 AND country=$3 AND lang=$4
+     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rec.post_id, rec.country, rec.lang]);
   const { rows } = await pool.query(
-    `INSERT INTO records (user_id, site_id, post_id, country, cpr, cpm, note, action)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${RET}`,
-    [req.uid, site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note, rec.action]);
+    `INSERT INTO records (user_id, site_id, post_id, country, lang, cpr, cpm, note, action)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING ${RET}`,
+    [req.uid, site.id, rec.post_id, rec.country, rec.lang, rec.cpr, rec.cpm, rec.note, rec.action]);
   res.status(201).json({ record: rows[0], previous: prev.rows[0] || null });
 }));
 
@@ -376,16 +396,16 @@ app.patch('/api/records/:id', auth, wrap(async (req, res) => {
   const site = await ownSite(req, intId(req.body.site_id, 'Site'));
   const rec = recordBody(req.body);
   const { rows } = await pool.query(
-    `UPDATE records r SET site_id=$1, post_id=$2, country=$3, cpr=$4, cpm=$5, note=$6, action=$7
+    `UPDATE records r SET site_id=$1, post_id=$2, country=$3, cpr=$4, cpm=$5, note=$6, action=$7, lang=$10
      FROM sites s WHERE s.id = r.site_id AND r.id=$8 AND ($9::int IS NULL OR s.user_id=$9)
-     RETURNING r.id, r.site_id, r.post_id, r.country, r.cpr, r.cpm, r.note, r.action, r.created_at`,
-    [site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note, rec.action, id, req.owner]);
+     RETURNING r.id, r.site_id, r.post_id, r.country, r.lang, r.cpr, r.cpm, r.note, r.action, r.created_at`,
+    [site.id, rec.post_id, rec.country, rec.cpr, rec.cpm, rec.note, rec.action, id, req.owner, rec.lang]);
   if (!rows[0]) throw new HttpError(404, 'Registro não encontrado.');
   const prev = await pool.query(
     `SELECT cpr, cpm, created_at FROM records
-     WHERE site_id=$1 AND post_id=$2 AND country=$3
+     WHERE site_id=$1 AND post_id=$2 AND country=$3 AND lang=$5
        AND (created_at, id) < (SELECT created_at, id FROM records WHERE id=$4)
-     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rows[0].post_id, rows[0].country, id]);
+     ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rows[0].post_id, rows[0].country, id, rows[0].lang]);
   res.json({ record: rows[0], previous: prev.rows[0] || null });
 }));
 
@@ -397,23 +417,32 @@ app.delete('/api/records/:id', auth, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// IDs cadastrados num site, com a última leitura de cada um (aba ATUALIZAÇÃO).
+app.get('/api/sites/:id/campaigns', auth, wrap(async (req, res) => {
+  const site = await ownSite(req, intId(req.params.id));
+  const { rows } = await pool.query(
+    `${BASE} SELECT post_id, country, lang, cpr, cpm, prev_cpr, prev_cpm, action, note, created_at, readings, added_by
+     FROM base WHERE site_id = $2 AND rn = 1 ORDER BY created_at DESC`, [req.owner, site.id]);
+  res.json({ site: { id: site.id, name: site.name, currency: site.currency }, campaigns: rows });
+}));
+
 const ACTION_LABEL = { escalei: 'ESCALEI', reduzi: 'REDUZI', mantive: 'MANTIVE', '': '' };
 
 app.get('/api/records/export.csv', auth, wrap(async (req, res) => {
   const params = [req.owner];
   const where = recordFilters(req.query, params);
   const { rows } = await pool.query(`${BASE} SELECT * FROM base ${where} ORDER BY created_at DESC, id DESC LIMIT 20000`, params);
-  const TEXT_COLS = new Set([1, 2, 3, 4, 5, 14]); // texto livre do usuário
+  const TEXT_COLS = new Set([1, 2, 3, 4, 5, 6, 15]); // texto livre do usuário
   const cell = (v, i) => {
     let s = v === null || v === undefined ? '' : String(v);
     if (TEXT_COLS.has(i) && /^[=+\-@\t\r]/.test(s)) s = "'" + s; // evita fórmula em planilha
     return '"' + s.replace(/"/g, '""') + '"';
   };
   const pct = (a, b) => (b ? (((a - b) / b) * 100).toFixed(2) : '');
-  const lines = [['data', 'post_id', 'pais', 'site', 'empresa', 'gestor', 'adicionado_por', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'ecpm', 'ecpm_anterior', 'ecpm_var_pct', 'acao', 'observacao'].join(',')];
+  const lines = [['data', 'post_id', 'pais', 'idioma', 'site', 'empresa', 'gestor', 'adicionado_por', 'moeda', 'cpr', 'cpr_anterior', 'cpr_var_pct', 'ecpm', 'ecpm_anterior', 'ecpm_var_pct', 'acao', 'observacao'].join(',')];
   for (const r of rows) {
     lines.push([
-      r.created_at.toISOString(), r.post_id, r.country, r.site_name, r.company, r.owner_name, r.added_by, r.currency,
+      r.created_at.toISOString(), r.post_id, r.country, r.lang, r.site_name, r.company, r.owner_name, r.added_by, r.currency,
       r.cpr, r.prev_cpr, pct(r.cpr, r.prev_cpr), r.cpm, r.prev_cpm, pct(r.cpm, r.prev_cpm), ACTION_LABEL[r.action] || '', r.note,
     ].map(cell).join(','));
   }
@@ -499,7 +528,7 @@ function addSheet(wb, name, subtitle, cols, rows, freezeCols = 1) {
 // Site, empresa e gestor são colunas normais, então dá para filtrar por qualquer um deles.
 const MAX_COLS_READINGS = 8;
 const FIXED = [
-  { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 },
+  { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 }, { h: 'IDIOMA', k: 'lang', t: 'key', w: 8 },
   { h: 'SITE', k: 'site', t: 'text', w: 22 }, { h: 'EMPRESA', k: 'company', t: 'text', w: 13 }, { h: 'GESTOR', k: 'owner', t: 'text', w: 16 },
   { h: 'STATUS', k: 'status', t: 'status', w: 12 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 9 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 9 },
   { h: 'LEIT.', k: 'n', t: 'int', w: 7 },
@@ -510,7 +539,7 @@ const PER = [
 ];
 
 function addIdsSheet(wb, camps, subtitle, local, K) {
-  const ws = wb.addWorksheet('IDs', { views: [{ state: 'frozen', xSplit: 3, ySplit: 5 }] });
+  const ws = wb.addWorksheet('IDs', { views: [{ state: 'frozen', xSplit: 4, ySplit: 5 }] });
   const cols = FIXED.map((c) => ({ width: c.w }));
   for (let k = 0; k < K; k++) PER.forEach((c) => cols.push({ width: c.w }));
   ws.columns = cols;
@@ -592,7 +621,7 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
   for (const r of rows) {
     if (!sites.has(r.site_id)) sites.set(r.site_id, { name: r.site_name, currency: r.currency, owner: r.owner_name, company: r.company, camps: new Map(), readings: [] });
     const s = sites.get(r.site_id);
-    const key = r.post_id + '|' + r.country;
+    const key = r.post_id + '|' + r.country + '|' + r.lang;
     if (!s.camps.has(key)) s.camps.set(key, []);
     s.camps.get(key).push(r);
     s.readings.push(r);
@@ -609,15 +638,15 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
       const dCpm = last.prev_cpm === null ? null : pctOf(last.cpm, last.prev_cpm);
       maxN = Math.max(maxN, list.length);
       mine.push({
-        post_id: last.post_id, country: last.country, site: s.name, company: s.company, owner: s.owner, currency: s.currency,
+        post_id: last.post_id, country: last.country, lang: last.lang || null, site: s.name, company: s.company, owner: s.owner, currency: s.currency,
         n: list.length, cpr: last.cpr, cpm: last.cpm, d_cpr: dCpr, d_cpm: dCpm, status: statusOf(dCpr, dCpm), list,
       });
     }
-    mine.sort((a, b) => a.post_id.localeCompare(b.post_id, undefined, { numeric: true }) || a.country.localeCompare(b.country));
+    mine.sort((a, b) => a.post_id.localeCompare(b.post_id, undefined, { numeric: true }) || a.country.localeCompare(b.country) || (a.lang || '').localeCompare(b.lang || ''));
     camps.push(...mine);
     const byCpr = mine.slice().sort((a, b) => a.cpr - b.cpr);
     const count = (st) => mine.filter((c) => c.status === st).length;
-    const label = (c) => `${c.post_id} · ${c.country}`;
+    const label = (c) => `${c.post_id} · ${c.country}${c.lang ? ' · ' + c.lang : ''}`;
     summary.push({
       site: s.name, company: s.company, owner: s.owner, currency: s.currency, moeda: s.currency, camps: mine.length, readings: s.readings.length,
       cpr_avg: avg(mine.map((c) => c.cpr)), cpm_avg: avg(mine.map((c) => c.cpm)),
@@ -650,23 +679,232 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
   // Todas as leituras numa lista só, com ID e país na frente, para filtrar.
   const flat = rows.slice().sort((a, b) => a.site_name.localeCompare(b.site_name) || a.post_id.localeCompare(b.post_id, undefined, { numeric: true })
     || a.country.localeCompare(b.country) || b.created_at - a.created_at).map((r) => ({
-    currency: r.currency, post_id: r.post_id, country: r.country, site: r.site_name, company: r.company, owner: r.owner_name, by: r.added_by,
+    currency: r.currency, post_id: r.post_id, country: r.country, lang: r.lang || null, site: r.site_name, company: r.company, owner: r.owner_name, by: r.added_by,
     at: local(r.created_at),
     cpr: r.cpr, d_cpr: r.prev_cpr === null ? null : pctOf(r.cpr, r.prev_cpr),
     cpm: r.cpm, d_cpm: r.prev_cpm === null ? null : pctOf(r.cpm, r.prev_cpm),
     action: ACTION_LABEL[r.action] || null, note: r.note,
   }));
   addSheet(wb, 'LEITURAS', sub + ' · mais recente primeiro dentro de cada ID', [
-    { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 }, { h: 'SITE', k: 'site', t: 'text', w: 22 },
+    { h: 'POST ID', k: 'post_id', t: 'key', w: 20 }, { h: 'PAÍS', k: 'country', t: 'key', w: 7 }, { h: 'IDIOMA', k: 'lang', t: 'key', w: 8 }, { h: 'SITE', k: 'site', t: 'text', w: 22 },
     { h: 'EMPRESA', k: 'company', t: 'text', w: 13 }, { h: 'GESTOR', k: 'owner', t: 'text', w: 16 }, { h: 'ADICIONADO POR', k: 'by', t: 'text', w: 16 },
     { h: 'DATA / HORA', k: 'at', t: 'date', w: 16 },
     { h: 'CPR', k: 'cpr', t: 'cur', w: 12 }, { h: 'Δ CPR', k: 'd_cpr', t: 'pct', w: 9 },
     { h: 'eCPM', k: 'cpm', t: 'cur', w: 12 }, { h: 'Δ eCPM', k: 'd_cpm', t: 'pct', up: true, w: 9 },
     { h: 'AÇÃO', k: 'action', t: 'action', w: 10 }, { h: 'OBSERVAÇÃO', k: 'note', t: 'text', w: 40 },
-  ], flat, 3);
+  ], flat, 4);
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="mbz-pulse-${stamp.slice(0, 10)}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+}));
+
+/* ---------- importação de planilha ---------- */
+
+const IMPORT_COLS = {
+  site: ['site', 'blog', 'dominio', 'domain'],
+  post_id: ['post_id', 'postid', 'post id', 'id', 'id do post', 'campanha', 'anuncio', 'ad id'],
+  country: ['pais', 'country', 'geo', 'cc'],
+  lang: ['idioma', 'lang', 'language', 'lingua'],
+  cpr: ['cpr'],
+  cpm: ['ecpm', 'cpm'],
+  action: ['acao', 'action', 'o que fez', 'ajuste'],
+  note: ['obs', 'observacao', 'observacoes', 'note', 'nota', 'comentario'],
+  at: ['data', 'data/hora', 'data hora', 'datahora', 'date', 'quando', 'horario', 'hora'],
+  owner: ['gestor', 'usuario', 'owner', 'dono'],
+};
+const normHeader = (h) => String(h ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase().replace(/[_\s]+/g, ' ');
+function mapHeaders(headers) {
+  const map = {};
+  headers.forEach((h, i) => {
+    const n = normHeader(h).replace(/\s*\(.*\)\s*$/, '');
+    for (const [key, names] of Object.entries(IMPORT_COLS)) {
+      if (map[key] === undefined && names.some((x) => x.replace(/_/g, ' ') === n)) map[key] = i;
+    }
+  });
+  return map;
+}
+
+// CSV simples (vírgula ou ponto e vírgula, aspas duplas).
+function parseCsv(text) {
+  text = text.replace(/^﻿/, '');
+  const firstLine = text.split(/\r?\n/)[0] || '';
+  const delim = (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length ? ';' : ',';
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) {
+      if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+
+const cellText = (v) => {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) return v;
+  if (typeof v === 'object') {
+    if (v.richText) return v.richText.map((t) => t.text).join('');
+    if (v.result !== undefined) return v.result;
+    if (v.text !== undefined) return v.text;
+  }
+  return v;
+};
+
+// Data informada na planilha, interpretada no fuso de quem importa (tzo em minutos, como getTimezoneOffset).
+function importDate(v, tzo) {
+  if (v === '' || v === null || v === undefined) return null;
+  if (v instanceof Date) return new Date(v.getTime() + tzo * 60000); // exceljs entrega a hora "de parede" como UTC
+  const s = String(v).trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    const y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+    return new Date(Date.UTC(y, +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)) + tzo * 60000);
+  }
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)) + tzo * 60000);
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d;
+  throw bad('Data inválida (use dd/mm/aaaa hh:mm).');
+}
+
+async function scopedSites(req) {
+  const { rows } = await pool.query(
+    `SELECT s.id, s.name, s.currency, s.user_id, o.name AS owner_name FROM sites s JOIN users o ON o.id = s.user_id
+     WHERE ($1::int IS NULL OR s.user_id = $1)`, [req.owner]);
+  return rows;
+}
+
+// Valida uma linha e devolve o registro pronto para inserir, ou a mensagem de erro.
+function buildImportRow(raw, sites, tzo) {
+  const out = { n: raw.n, site: String(raw.site ?? '').trim(), post_id: String(raw.post_id ?? '').trim(), country: String(raw.country ?? '').trim().toUpperCase(),
+    lang: String(raw.lang ?? '').trim().toLowerCase(), cpr: raw.cpr, cpm: raw.cpm, action: String(raw.action ?? '').trim(), note: String(raw.note ?? '').trim(),
+    at: null, owner: String(raw.owner ?? '').trim(), site_id: null, currency: null, error: null };
+  try {
+    if (!out.site) throw bad('Site em branco.');
+    const matches = sites.filter((s) => s.name.toLowerCase() === out.site.toLowerCase());
+    let site = matches[0];
+    if (matches.length > 1) {
+      site = matches.find((s) => s.owner_name.toLowerCase() === out.owner.toLowerCase());
+      if (!site) throw bad(`Há ${matches.length} sites "${out.site}" (gestores: ${matches.map((s) => s.owner_name).join(', ')}). Preencha a coluna GESTOR.`);
+    }
+    if (!site) throw bad(`Site "${out.site}" não encontrado. Cadastre antes ou confira o nome.`);
+    out.site_id = site.id; out.currency = site.currency; out.site = site.name; out.owner = site.owner_name;
+    out.post_id = str(out.post_id, 80, 'Post ID');
+    out.country = country(out.country);
+    out.lang = langOf(out.lang);
+    out.cpr = money(out.cpr, 'CPR');
+    out.cpm = money(out.cpm, 'eCPM');
+    const a = normHeader(out.action);
+    out.action = actionOf({ escalei: 'escalei', escalar: 'escalei', escala: 'escalei', reduzi: 'reduzi', reduzir: 'reduzi', mantive: 'mantive', manter: 'mantive', mantido: 'mantive' }[a] || a);
+    out.note = str(out.note, 280, 'Observação', { required: false });
+    out.at = importDate(raw.at, tzo);
+    if (out.at && out.at.getTime() > Date.now() + 60e3) throw bad('Data no futuro.');
+  } catch (e) {
+    if (!(e instanceof HttpError)) throw e;
+    out.error = e.message;
+  }
+  return out;
+}
+
+const rawBody = express.raw({ type: () => true, limit: '8mb' });
+
+// 1) Lê o arquivo (xlsx ou csv), valida linha a linha e devolve a prévia. Não grava nada.
+app.post('/api/import/parse', auth, rawBody, wrap(async (req, res) => {
+  const buf = req.body;
+  if (!buf || !buf.length) throw bad('Arquivo vazio.');
+  const tzo = Math.min(Math.max(parseInt(req.query.tzo, 10) || 0, -840), 840);
+  let table;
+  if (buf[0] === 0x50 && buf[1] === 0x4b) { // xlsx (zip)
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf);
+    const ws = wb.worksheets.find((w) => w.name.toUpperCase() !== 'SITES' && w.name.toUpperCase() !== 'AJUDA') || wb.worksheets[0];
+    if (!ws) throw bad('Planilha sem abas.');
+    table = [];
+    ws.eachRow({ includeEmpty: false }, (row) => {
+      const vals = [];
+      for (let c = 1; c <= ws.columnCount; c++) vals.push(cellText(row.getCell(c).value));
+      if (vals.some((v) => v !== '' && v !== null)) table.push(vals);
+    });
+  } else {
+    table = parseCsv(buf.toString('utf8'));
+  }
+  if (table.length < 2) throw bad('A planilha precisa de um cabeçalho e pelo menos uma linha.');
+  const map = mapHeaders(table[0]);
+  const missing = ['site', 'post_id', 'country', 'cpr', 'cpm'].filter((k) => map[k] === undefined);
+  if (missing.length) throw bad(`Faltam colunas: ${missing.map((k) => ({ site: 'SITE', post_id: 'POST ID', country: 'PAÍS', cpr: 'CPR', cpm: 'eCPM' }[k])).join(', ')}. Baixe o modelo para ver o formato.`);
+  const sites = await scopedSites(req);
+  const rows = table.slice(1, 5001).map((vals, i) => {
+    const pick = (k) => (map[k] === undefined ? '' : vals[map[k]]);
+    return buildImportRow({ n: i + 2, site: pick('site'), post_id: pick('post_id'), country: pick('country'), lang: pick('lang'),
+      cpr: pick('cpr'), cpm: pick('cpm'), action: pick('action'), note: pick('note'), at: pick('at'), owner: pick('owner') }, sites, tzo);
+  });
+  res.json({ rows, ok: rows.filter((r) => !r.error).length, errors: rows.filter((r) => r.error).length, truncated: table.length - 1 > 5000 });
+}));
+
+// 2) Grava as linhas válidas (revalida tudo no servidor).
+app.post('/api/import/commit', auth, wrap(async (req, res) => {
+  const list = Array.isArray(req.body.rows) ? req.body.rows.slice(0, 5000) : [];
+  if (!list.length) throw bad('Nada para importar.');
+  const sites = await scopedSites(req);
+  const rows = list.map((r, i) => buildImportRow({ ...r, n: r.n || i + 1 }, sites, 0)).filter((r) => !r.error);
+  if (!rows.length) throw bad('Nenhuma linha válida.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const r of rows) {
+      await client.query(
+        `INSERT INTO records (user_id, site_id, post_id, country, lang, cpr, cpm, note, action, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, COALESCE($10, now()))`,
+        [req.uid, r.site_id, r.post_id, r.country, r.lang, r.cpr, r.cpm, r.note, r.action, r.at]);
+    }
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
+  res.json({ imported: rows.length, skipped: list.length - rows.length });
+}));
+
+// Modelo para preencher, com os sites do usuário numa aba de apoio.
+app.get('/api/import/template.xlsx', auth, wrap(async (req, res) => {
+  const sites = await scopedSites(req);
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('LEITURAS', { views: [{ state: 'frozen', ySplit: 1 }] });
+  const heads = ['SITE', 'POST ID', 'PAÍS', 'IDIOMA', 'CPR', 'eCPM', 'AÇÃO', 'OBS', 'DATA (opcional)'];
+  if (req.user.is_master) heads.push('GESTOR');
+  ws.columns = [26, 22, 8, 10, 10, 10, 12, 36, 20, 18].slice(0, heads.length).map((width) => ({ width }));
+  const head = ws.getRow(1);
+  heads.forEach((h, i) => Object.assign(head.getCell(i + 1), { value: h, font: font({ bold: true, color: { argb: 'FF19E3FF' } }), fill: DARK }));
+  const ex = sites[0] ? sites[0].name : 'Nome do site';
+  ws.addRow([ex, '120214567890123', 'US', 'en', 0.02, 5.84, 'escalei', 'subi orçamento', '']);
+  ws.addRow([ex, '120214567890123', 'US', 'es', 0.03, 4.1, 'mantive', '', '']);
+  ws.addRow([ex, '120214567890124', 'BR', '', 0.8, 18.5, 'reduzi', 'troquei criativo', '13/10/2026 14:30']);
+  ws.getColumn(5).numFmt = '0.00##'; ws.getColumn(6).numFmt = '0.00##';
+  ws.getColumn(2).numFmt = '@';
+  const help = wb.addWorksheet('AJUDA');
+  help.columns = [{ width: 110 }];
+  [
+    'MBZ::PULSE — modelo de importação',
+    '',
+    'Cada linha vira UMA leitura nova (não substitui as anteriores; o histórico é preservado).',
+    'SITE: exatamente como está cadastrado (veja a aba SITES). POST ID: o ID do post/anúncio.',
+    'PAÍS: código de 2 letras (BR, US, PT...). IDIOMA: opcional (en, es, pt...). Use quando o mesmo ID roda em dois idiomas no mesmo país.',
+    'CPR e eCPM: números (0,35 ou 0.35). AÇÃO: escalei, reduzi ou mantive (opcional). OBS: texto livre (opcional).',
+    'DATA: opcional, dd/mm/aaaa hh:mm no seu horário local. Em branco = momento da importação.',
+    'As linhas de exemplo podem ser apagadas. As colunas podem vir em outra ordem, desde que o cabeçalho seja mantido.',
+  ].forEach((t, i) => { help.getCell(i + 1, 1).value = t; if (i === 0) help.getCell(1, 1).font = font({ bold: true, size: 13 }); });
+  const ss = wb.addWorksheet('SITES');
+  ss.columns = [{ width: 30 }, { width: 10 }, { width: 20 }];
+  ss.addRow(['SITE', 'MOEDA', 'GESTOR']).font = font({ bold: true });
+  sites.sort((a, b) => a.name.localeCompare(b.name)).forEach((s) => ss.addRow([s.name, s.currency, s.owner_name]));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="mbz-pulse-modelo-importacao.xlsx"');
   await wb.xlsx.write(res);
   res.end();
 }));

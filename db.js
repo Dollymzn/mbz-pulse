@@ -52,7 +52,8 @@ async function migrate() {
     ALTER TABLE users   ADD COLUMN IF NOT EXISTS company   TEXT    NOT NULL DEFAULT '';
     ALTER TABLE users   ADD COLUMN IF NOT EXISTS is_master BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE records ADD COLUMN IF NOT EXISTS action    TEXT    NOT NULL DEFAULT '';
-    CREATE INDEX IF NOT EXISTS records_site_key_idx ON records (site_id, post_id, country, created_at DESC);
+    ALTER TABLE records ADD COLUMN IF NOT EXISTS lang      TEXT    NOT NULL DEFAULT '';
+    CREATE INDEX IF NOT EXISTS records_site_key2_idx ON records (site_id, post_id, country, lang, created_at DESC);
   `);
 }
 
