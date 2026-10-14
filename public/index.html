@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@600;800&display=swap" rel="stylesheet">
+<script>try{var t=localStorage.getItem("pulse-theme");if(t)document.documentElement.setAttribute("data-theme",t);}catch(e){}</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -41,6 +42,7 @@
   <header class="top">
     <div class="logo">MBZ<span>::</span>PULSE</div>
     <div class="top-right">
+      <button class="btn ghost sm theme-btn" id="themeBtn" title="Alternar modo claro / escuro" type="button">CLARO</button>
       <span class="live"><i></i>ONLINE</span>
       <span id="masterBadge" class="badge" hidden title="Vê os sites e leituras de todos os gestores">MASTER</span>
       <span id="userName" class="user"></span>
@@ -102,8 +104,8 @@
           <input name="post_id" maxlength="80" placeholder="ex.: 120214567890123" required inputmode="numeric" list="knownPosts">
         </label>
         <div class="grid2">
-          <label>CPR <small id="curCpr"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required></label>
-          <label>eCPM <small id="curCpm"></small><input name="cpm" inputmode="decimal" placeholder="0,00" required></label>
+          <label>CPR <small id="curCpr"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required class="num-in"></label>
+          <label>eCPM <small id="curCpm"></small><input name="cpm" inputmode="decimal" placeholder="0,00" required class="num-in"></label>
         </div>
         <div class="field">
           <span class="lbl">O QUE VOCÊ FEZ <small>opcional</small></span>
@@ -219,8 +221,8 @@
     <div id="mToday"></div>
     <form id="mForm" autocomplete="off">
       <div class="grid2">
-        <label>CPR <small id="mCur"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required></label>
-        <label>eCPM<input name="cpm" inputmode="decimal" placeholder="0,00" required></label>
+        <label>CPR <small id="mCur"></small><input name="cpr" inputmode="decimal" placeholder="0,00" required class="num-in"></label>
+        <label>eCPM<input name="cpm" inputmode="decimal" placeholder="0,00" required class="num-in"></label>
       </div>
       <div id="mCompare" class="m-compare"></div>
       <div class="field">

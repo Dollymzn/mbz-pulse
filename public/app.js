@@ -749,6 +749,41 @@ $('#impCommit').addEventListener('click', async () => {
   } catch (err) { $('#impErr').textContent = err.message; $('#impCommit').disabled = false; }
 });
 
+/* ---------- campos numéricos (CPR / eCPM) ---------- */
+// Só dígitos e UM separador decimal. "." vira "," automaticamente; letras e símbolos são descartados.
+function sanitizeNum(input) {
+  const raw = input.value;
+  let out = '', sep = false;
+  for (const ch of raw) {
+    if (ch >= '0' && ch <= '9') out += ch;
+    else if ((ch === ',' || ch === '.') && !sep) { out += ','; sep = true; }
+  }
+  if (out.startsWith(',')) out = '0' + out;
+  if (out !== raw) {
+    const pos = input.selectionStart - (raw.length - out.length);
+    input.value = out;
+    try { input.setSelectionRange(Math.max(0, pos), Math.max(0, pos)); } catch { /* tipo sem seleção */ }
+  }
+}
+$$('.num-in').forEach((el) => {
+  el.addEventListener('input', () => sanitizeNum(el));
+  el.addEventListener('paste', () => setTimeout(() => { sanitizeNum(el); el.dispatchEvent(new Event('input')); }, 0));
+  el.addEventListener('keydown', (e) => { // bloqueia antes de entrar
+    if (e.key.length === 1 && !/[0-9.,]/.test(e.key) && !e.ctrlKey && !e.metaKey) e.preventDefault();
+  });
+});
+
+/* ---------- tema ---------- */
+function applyTheme(t) {
+  if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  else document.documentElement.removeAttribute('data-theme');
+  $('#themeBtn').textContent = t === 'light' ? 'ESCURO' : 'CLARO';
+  $('#themeBtn').title = t === 'light' ? 'Voltar ao modo escuro' : 'Modo claro';
+  try { localStorage.setItem('pulse-theme', t === 'light' ? 'light' : 'dark'); } catch { /* sem storage */ }
+}
+$('#themeBtn').addEventListener('click', () => applyTheme(document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light'));
+(() => { let t = 'dark'; try { t = localStorage.getItem('pulse-theme') || 'dark'; } catch { /* */ } applyTheme(t); })();
+
 /* ---------- boot ---------- */
 
 $('#countries').innerHTML = COUNTRIES.map((c) => `<option value="${c.code}">${esc(c.name)}</option>`).join('');
