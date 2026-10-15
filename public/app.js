@@ -29,7 +29,7 @@ function normCountry(input) {
   if (code && plain(input.value).length > 2) input.value = code;
 }
 
-const ACTION_LABEL = { escalei: '▲ ESCALEI', reduzi: '▼ REDUZI', mantive: '■ MANTIVE' };
+const ACTION_LABEL = { escalei: '▲ ESCALEI', reduzi: '▼ REDUZI', mantive: '■ MANTIVE', desativei: '⏻ DESATIVEI' };
 const state = { user: null, sites: [], users: [], records: [], total: 0, mode: 'latest', last: null, lastKey: '', seq: 0, editing: null };
 let config = { companies: [], actions: [] };
 const isMaster = () => !!(state.user && state.user.is_master);
@@ -342,6 +342,10 @@ function renderCompare() {
     return;
   }
 
+  if (ref.action === 'desativei' && !state.editing) {
+    box.innerHTML = keyLine + `<div class="verdict off">DESATIVADA<small>Desativada ${ago(ref.created_at)} (${when(ref.created_at)}) · última leitura ${money(ref.cpr, cur)} · ${money(ref.cpm, cur)}.<br>Não aceita leitura nova. Para reativar, corrija a última leitura pelo lápis no histórico e troque a ação.</small></div>`;
+    return;
+  }
   const dCpr = delta(cpr, ref.cpr);
   const dCpm = delta(cpm, ref.cpm, true);
   let v = { cls: '', text: 'DIGITE CPR E eCPM' };
@@ -392,6 +396,7 @@ rf.addEventListener('submit', async (e) => {
   const k = keyOf();
   if (!k.site_id) { err.textContent = 'Cadastre um site primeiro.'; return; }
   if (parseNum(rf.cpr.value) === null || parseNum(rf.cpm.value) === null) { err.textContent = 'CPR e eCPM precisam ser números (ex.: 0,35).'; return; }
+  if (rf.action.value === 'desativei' && !state.editing && !confirm(`Desativar a campanha ${k.post_id} · ${k.country}${k.lang ? ' · ' + k.lang : ''}? Ela sai da aba ATUALIZAÇÃO e não aceita leitura nova (dá para reativar corrigindo esta leitura).`)) return;
   const btn = $('#recBtn');
   btn.disabled = true;
   try {
@@ -492,7 +497,7 @@ function renderRecords(flashId) {
       <td title="${esc(new Date(r.created_at).toLocaleString('pt-BR'))}">${when(r.created_at)} <span class="dim">· ${ago(r.created_at)}</span></td>
       <td>${esc(r.site_name)}</td>
       ${isMaster() ? `<td class="dim" title="gravado por ${esc(r.added_by)}">${esc(r.owner_name)}</td>` : ''}
-      <td class="pid">${esc(r.post_id)}${state.mode === 'latest' && r.readings > 1 ? `<span class="tag">${r.readings}×</span>` : ''}</td>
+      <td class="pid">${esc(r.post_id)}${state.mode === 'latest' && r.readings > 1 ? `<span class="tag">${r.readings}×</span>` : ''}${state.mode === 'latest' && r.action === 'desativei' ? '<span class="tag off">OFF</span>' : ''}</td>
       <td>${geo(r.country, r.lang)}</td>
       <td class="num">${money(r.cpr, r.currency)}</td>${dcell(r.cpr, r.prev_cpr)}
       <td class="num">${money(r.cpm, r.currency)}</td>${dcell(r.cpm, r.prev_cpm, true)}
@@ -694,6 +699,7 @@ mf.addEventListener('submit', async (e) => {
   const c = upd.current;
   if (!c) return;
   if (parseNum(mf.cpr.value) === null || parseNum(mf.cpm.value) === null) { $('#mErr').textContent = 'CPR e eCPM precisam ser números.'; return; }
+  if (mf.action.value === 'desativei' && !confirm(`Desativar a campanha ${c.post_id} · ${c.country}${c.lang ? ' · ' + c.lang : ''}? Ela sai desta lista e não aceita leitura nova.`)) return;
   $('#mBtn').disabled = true;
   try {
     const { record, previous } = await api('/records', { method: 'POST', body: {
@@ -701,9 +707,11 @@ mf.addEventListener('submit', async (e) => {
       cpr: mf.cpr.value, cpm: mf.cpm.value, note: mf.note.value, action: mf.action.value } });
     const d = previous ? delta(record.cpr, previous.cpr) : null;
     toast(d ? `GRAVADO · CPR ${d.text} · eCPM ${delta(record.cpm, previous.cpm, true).text}` : 'GRAVADO · primeira leitura desta campanha');
+    const off = record.action === 'desativei';
     mf.cpr.value = ''; mf.cpm.value = ''; mf.note.value = ''; mSetAction('');
-    await Promise.all([loadModalHistory(), loadCampaigns(), loadSites(), loadRecords(true, record.id)]);
-    mf.cpr.focus();
+    if (off) { closeModal(); toast(`Campanha ${c.post_id} · ${c.country} desativada.`); }
+    await Promise.all([off ? null : loadModalHistory(), loadCampaigns(), loadSites(), loadRecords(true, record.id)]);
+    if (!off) mf.cpr.focus();
   } catch (err) { $('#mErr').textContent = err.message; }
   finally { $('#mBtn').disabled = false; }
 });

@@ -249,7 +249,7 @@ td .icon + .icon { margin-left: 2px; }
 .field { margin-bottom: 12px; }
 .field .lbl { display: block; font-size: 10px; letter-spacing: .14em; color: var(--dim); }
 .field .lbl small { color: var(--cyan); letter-spacing: 0; margin-left: 6px; }
-.actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 5px; }
+.actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 5px; }
 .act {
   font: 700 10px var(--mono); letter-spacing: .1em; cursor: pointer; padding: 8px 4px;
   background: var(--field); color: var(--dim); border: 1px solid var(--line); transition: all .15s;
@@ -362,3 +362,11 @@ tr.has-err td { opacity: .75; }
 :root[data-theme="light"] .fx-scan { display: none; }
 
 .theme-btn { padding: 7px 10px; }
+
+/* ---- desativei ---- */
+.act.on[data-action=desativei] { color: var(--bad); border-color: var(--bad); background: rgba(255, 61, 134, .1); }
+.atag.desativei { color: var(--bad); }
+.tag.off { color: var(--bad); border-color: var(--bad); }
+.verdict.off { color: var(--bad); border-color: rgba(255, 61, 134, .7); background: rgba(255, 61, 134, .08); }
+.verdict.off small { line-height: 1.6; }
+@media (max-width: 420px) { .actions { grid-template-columns: repeat(2, 1fr); } }

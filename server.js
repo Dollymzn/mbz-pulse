@@ -12,7 +12,8 @@ const INVITE_CODE = (process.env.INVITE_CODE || '').trim();
 // E-mails com acesso master (veem e filtram os sites de todos os gestores). Separados por vírgula.
 const MASTER_EMAILS = (process.env.MASTER_EMAILS || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 const COMPANIES = ['TN Digitech', 'Moodlr'];
-const ACTIONS = ['escalei', 'reduzi', 'mantive'];
+const ACTIONS = ['escalei', 'reduzi', 'mantive', 'desativei'];
+const DEACTIVATED = 'desativei'; // última leitura com esta ação = campanha desativada (sai da aba ATUALIZAÇÃO, não aceita leitura nova)
 const COOKIE = 'mbz_pulse';
 const MAX_AGE = 30 * 24 * 60 * 60; // 30 dias
 
@@ -381,8 +382,11 @@ app.post('/api/records', auth, wrap(async (req, res) => {
   const site = await ownSite(req, intId(req.body.site_id, 'Site'));
   const rec = recordBody(req.body);
   const prev = await pool.query(
-    `SELECT cpr, cpm, created_at FROM records WHERE site_id=$1 AND post_id=$2 AND country=$3 AND lang=$4
+    `SELECT cpr, cpm, action, created_at FROM records WHERE site_id=$1 AND post_id=$2 AND country=$3 AND lang=$4
      ORDER BY created_at DESC, id DESC LIMIT 1`, [site.id, rec.post_id, rec.country, rec.lang]);
+  if (prev.rows[0] && prev.rows[0].action === DEACTIVATED) {
+    throw new HttpError(409, 'Campanha desativada: não aceita leitura nova. Para reativar, corrija a última leitura (lápis no histórico) e troque a ação.');
+  }
   const { rows } = await pool.query(
     `INSERT INTO records (user_id, site_id, post_id, country, lang, cpr, cpm, note, action)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING ${RET}`,
@@ -422,11 +426,11 @@ app.get('/api/sites/:id/campaigns', auth, wrap(async (req, res) => {
   const site = await ownSite(req, intId(req.params.id));
   const { rows } = await pool.query(
     `${BASE} SELECT post_id, country, lang, cpr, cpm, prev_cpr, prev_cpm, action, note, created_at, readings, added_by
-     FROM base WHERE site_id = $2 AND rn = 1 ORDER BY created_at DESC`, [req.owner, site.id]);
+     FROM base WHERE site_id = $2 AND rn = 1 AND action <> $3 ORDER BY created_at DESC`, [req.owner, site.id, DEACTIVATED]);
   res.json({ site: { id: site.id, name: site.name, currency: site.currency }, campaigns: rows });
 }));
 
-const ACTION_LABEL = { escalei: 'ESCALEI', reduzi: 'REDUZI', mantive: 'MANTIVE', '': '' };
+const ACTION_LABEL = { escalei: 'ESCALEI', reduzi: 'REDUZI', mantive: 'MANTIVE', desativei: 'DESATIVEI', '': '' };
 
 app.get('/api/records/export.csv', auth, wrap(async (req, res) => {
   const params = [req.owner];
@@ -458,7 +462,8 @@ const FLAT_PCT = 0.02; // mesma faixa de "estável" da tela
 const pctOf = (cur, prev) => (prev ? (cur - prev) / prev : null);
 const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length;
 
-function statusOf(dCpr, dCpm) {
+function statusOf(dCpr, dCpm, action) {
+  if (action === DEACTIVATED) return 'DESATIVADA';
   if (dCpr === null && dCpm === null) return '1ª LEITURA';
   // gain > 0 = melhorou. CPR é custo (cair é bom); eCPM é receita (subir é bom).
   const cls = (gain) => (gain === null ? null : gain > FLAT_PCT ? 'good' : gain < -FLAT_PCT ? 'bad' : 'flat');
@@ -468,8 +473,8 @@ function statusOf(dCpr, dCpm) {
   if (set.includes('good')) return 'MELHOROU';
   return 'ESTÁVEL';
 }
-const STATUS_COLOR = { MELHOROU: 'FF12824C', PIOROU: 'FFD81B60', MISTO: 'FFB7791F', 'ESTÁVEL': 'FF0E7490', '1ª LEITURA': 'FF64748B' };
-const ACTION_COLOR = { ESCALEI: 'FF0E7490', REDUZI: 'FFB7791F', MANTIVE: 'FF64748B' };
+const STATUS_COLOR = { MELHOROU: 'FF12824C', PIOROU: 'FFD81B60', MISTO: 'FFB7791F', 'ESTÁVEL': 'FF0E7490', '1ª LEITURA': 'FF64748B', DESATIVADA: 'FF8B0000' };
+const ACTION_COLOR = { ESCALEI: 'FF0E7490', REDUZI: 'FFB7791F', MANTIVE: 'FF64748B', DESATIVEI: 'FF8B0000' };
 const DARK = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0A0E16' } };
 const font = (o = {}) => ({ name: 'Consolas', size: 10, ...o });
 const pctColor = (gain) => (gain > FLAT_PCT ? 'FF12824C' : gain < -FLAT_PCT ? 'FFD81B60' : 'FF64748B');
@@ -639,7 +644,7 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
       maxN = Math.max(maxN, list.length);
       mine.push({
         post_id: last.post_id, country: last.country, lang: last.lang || null, site: s.name, company: s.company, owner: s.owner, currency: s.currency,
-        n: list.length, cpr: last.cpr, cpm: last.cpm, d_cpr: dCpr, d_cpm: dCpm, status: statusOf(dCpr, dCpm), list,
+        n: list.length, cpr: last.cpr, cpm: last.cpm, d_cpr: dCpr, d_cpm: dCpm, status: statusOf(dCpr, dCpm, last.action), list,
       });
     }
     mine.sort((a, b) => a.post_id.localeCompare(b.post_id, undefined, { numeric: true }) || a.country.localeCompare(b.country) || (a.lang || '').localeCompare(b.lang || ''));
@@ -650,7 +655,7 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
     summary.push({
       site: s.name, company: s.company, owner: s.owner, currency: s.currency, moeda: s.currency, camps: mine.length, readings: s.readings.length,
       cpr_avg: avg(mine.map((c) => c.cpr)), cpm_avg: avg(mine.map((c) => c.cpm)),
-      up: count('MELHOROU'), down: count('PIOROU'), mixed: count('MISTO'), flat: count('ESTÁVEL'),
+      up: count('MELHOROU'), down: count('PIOROU'), mixed: count('MISTO'), flat: count('ESTÁVEL'), off: count('DESATIVADA'),
       best: label(byCpr[0]), best_cpr: byCpr[0].cpr, worst: label(byCpr[byCpr.length - 1]), worst_cpr: byCpr[byCpr.length - 1].cpr,
       last_at: local(new Date(Math.max(...s.readings.map((r) => r.created_at.getTime())))),
     });
@@ -670,7 +675,7 @@ app.get('/api/records/export.xlsx', auth, wrap(async (req, res) => {
     { h: 'IDs', k: 'camps', t: 'int', w: 8 }, { h: 'LEITURAS', k: 'readings', t: 'int', w: 11 },
     { h: 'CPR MÉDIO ATUAL', k: 'cpr_avg', t: 'cur', w: 18 }, { h: 'eCPM MÉDIO ATUAL', k: 'cpm_avg', t: 'cur', w: 18 },
     { h: 'MELHORARAM', k: 'up', t: 'int', w: 13 }, { h: 'PIORARAM', k: 'down', t: 'int', w: 11 },
-    { h: 'MISTAS', k: 'mixed', t: 'int', w: 9 }, { h: 'ESTÁVEIS', k: 'flat', t: 'int', w: 11 },
+    { h: 'MISTAS', k: 'mixed', t: 'int', w: 9 }, { h: 'ESTÁVEIS', k: 'flat', t: 'int', w: 11 }, { h: 'DESATIVADAS', k: 'off', t: 'int', w: 13 },
     { h: 'MELHOR CPR (ID · PAÍS)', k: 'best', t: 'text', w: 30 }, { h: 'CPR', k: 'best_cpr', t: 'cur', w: 12 },
     { h: 'PIOR CPR (ID · PAÍS)', k: 'worst', t: 'text', w: 30 }, { h: 'CPR', k: 'worst_cpr', t: 'cur', w: 12 },
     { h: 'ÚLTIMA LEITURA', k: 'last_at', t: 'date', w: 18 },
@@ -804,7 +809,7 @@ function buildImportRow(raw, sites, tzo) {
     out.cpr = money(out.cpr, 'CPR');
     out.cpm = money(out.cpm, 'eCPM');
     const a = normHeader(out.action);
-    out.action = actionOf({ escalei: 'escalei', escalar: 'escalei', escala: 'escalei', reduzi: 'reduzi', reduzir: 'reduzi', mantive: 'mantive', manter: 'mantive', mantido: 'mantive' }[a] || a);
+    out.action = actionOf({ escalei: 'escalei', escalar: 'escalei', escala: 'escalei', reduzi: 'reduzi', reduzir: 'reduzi', mantive: 'mantive', manter: 'mantive', mantido: 'mantive', desativei: 'desativei', desativar: 'desativei', desativada: 'desativei', desativado: 'desativei', pausei: 'desativei' }[a] || a);
     out.note = str(out.note, 280, 'Observação', { required: false });
     out.at = importDate(raw.at, tzo);
     if (out.at && out.at.getTime() > Date.now() + 60e3) throw bad('Data no futuro.');
@@ -895,7 +900,7 @@ app.get('/api/import/template.xlsx', auth, wrap(async (req, res) => {
     'Cada linha vira UMA leitura nova (não substitui as anteriores; o histórico é preservado).',
     'SITE: exatamente como está cadastrado (veja a aba SITES). POST ID: o ID do post/anúncio.',
     'PAÍS: código de 2 letras (BR, US, PT...). IDIOMA: opcional (en, es, pt...). Use quando o mesmo ID roda em dois idiomas no mesmo país.',
-    'CPR e eCPM: números (0,35 ou 0.35). AÇÃO: escalei, reduzi ou mantive (opcional). OBS: texto livre (opcional).',
+    'CPR e eCPM: números (0,35 ou 0.35). AÇÃO: escalei, reduzi, mantive ou desativei (opcional; desativei tira a campanha da aba ATUALIZAÇÃO). OBS: texto livre (opcional).',
     'DATA: opcional, dd/mm/aaaa hh:mm no seu horário local. Em branco = momento da importação.',
     'As linhas de exemplo podem ser apagadas. As colunas podem vir em outra ordem, desde que o cabeçalho seja mantido.',
   ].forEach((t, i) => { help.getCell(i + 1, 1).value = t; if (i === 0) help.getCell(1, 1).font = font({ bold: true, size: 13 }); });
